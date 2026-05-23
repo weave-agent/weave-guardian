@@ -76,11 +76,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 5
 
 ### Task 5: Implement core command classifiers
-- [ ] classify git commands into `git.read`, `git.write`, `git.discard`, `git.remote_write`, and `git.history_rewrite`
-- [ ] classify filesystem shell commands such as `rm`, `mv`, `cp`, `mkdir`, `touch`, `sed`, `find`, `grep`, and `rg`
-- [ ] classify network commands such as `curl`, `wget`, and HTTP methods into `network.read` and `network.write`
-- [ ] write table-driven tests for allow/ask/block examples across command families
-- [ ] run `go test ./...` - must pass before task 6
+- [x] classify git commands into `git.read`, `git.write`, `git.discard`, `git.remote_write`, and `git.history_rewrite`
+- [x] classify filesystem shell commands such as `rm`, `mv`, `cp`, `mkdir`, `touch`, `sed`, `find`, `grep`, and `rg`
+- [x] classify network commands such as `curl`, `wget`, and HTTP methods into `network.read` and `network.write`
+- [x] write table-driven tests for allow/ask/block examples across command families
+- [x] run `go test ./...` - must pass before task 6
 
 ### Task 6: Implement developer workflow command classifiers
 - [ ] classify package and build commands for `npm`, `pnpm`, `yarn`, `bun`, `go`, `cargo`, `python`, `uv`, `pip`, `make`, and `just`

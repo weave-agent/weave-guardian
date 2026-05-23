@@ -11,15 +11,23 @@ import (
 )
 
 const (
-	actionFileRead      = "file.read"
-	actionFileWrite     = "file.write"
-	actionFileDelete    = "file.delete"
-	actionFileProtected = "file.write_protected"
-	actionPolicyRead    = "policy.read"
-	actionPolicyWrite   = "policy.write"
-	actionSecretRead    = "secret.read"
-	actionNetworkRead   = "network.read"
-	actionUnknown       = "unknown"
+	actionFileRead          = "file.read"
+	actionFileWrite         = "file.write"
+	actionFileDelete        = "file.delete"
+	actionFileProtected     = "file.write_protected"
+	actionPolicyRead        = "policy.read"
+	actionPolicyWrite       = "policy.write"
+	actionSecretRead        = "secret.read"
+	actionNetworkRead       = "network.read"
+	actionNetworkWrite      = "network.write"
+	actionGitRead           = "git.read"
+	actionGitWrite          = "git.write"
+	actionGitDiscard        = "git.discard"
+	actionGitRemoteWrite    = "git.remote_write"
+	actionGitHistoryRewrite = "git.history_rewrite"
+	actionCommandRead       = "command.read"
+	actionCommandWrite      = "command.write"
+	actionUnknown           = "unknown"
 )
 
 type classifiedPath struct {

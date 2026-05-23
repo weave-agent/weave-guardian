@@ -546,6 +546,106 @@ func TestExecRequestUsesShellParserObfuscationResult(t *testing.T) {
 	assert.Equal(t, actionCommandObfuscated, classifyRequest(req))
 }
 
+func TestCoreCommandClassifiers(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  string
+		wantType string
+		want     sdk.GuardianDecisionAction
+	}{
+		{
+			name:     "git status is read",
+			command:  "git status --short",
+			wantType: actionGitRead,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "git add is write",
+			command:  "git add .",
+			wantType: actionGitWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "git reset hard discards work",
+			command:  "git reset --hard HEAD",
+			wantType: actionGitDiscard,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "git push writes remote",
+			command:  "git push origin main",
+			wantType: actionGitRemoteWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "git commit amend rewrites history",
+			command:  "git commit --amend --no-edit",
+			wantType: actionGitHistoryRewrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "grep is read",
+			command:  "rg TODO .",
+			wantType: actionCommandRead,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "mkdir is write",
+			command:  "mkdir -p build/out",
+			wantType: actionCommandWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "rm deletes files",
+			command:  "rm old.txt",
+			wantType: actionFileDelete,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "rm root is dangerous",
+			command:  "rm -rf /",
+			wantType: actionCommandDangerousDelete,
+			want:     sdk.GuardianDecisionBlock,
+		},
+		{
+			name:     "curl get is network read",
+			command:  "curl https://example.com",
+			wantType: actionNetworkRead,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "curl post is network write",
+			command:  `curl -X POST -d '{"ok":true}' https://example.com`,
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "http delete is network write",
+			command:  "http DELETE https://example.com/items/1",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+	}
+
+	g := New(Config{Profile: "ask"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := sdk.GuardianRequest{
+				ID:      "req-" + tt.name,
+				Action:  sdk.GuardianActionExec,
+				Command: tt.command,
+			}
+
+			assert.Equal(t, tt.wantType, classifyRequest(req))
+
+			decision, err := g.Decide(context.Background(), req)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantType, decision.Metadata[actionTypeMetadataKey])
+			assert.Equal(t, tt.want, decision.Action)
+		})
+	}
+}
+
 func TestSnapshotIncludesResolvedProfiles(t *testing.T) {
 	g := New(Config{
 		Profile: "team",
