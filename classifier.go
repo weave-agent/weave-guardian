@@ -124,8 +124,8 @@ func resolveSymlinkAware(path string) string {
 	for {
 		resolved, err = filepath.EvalSymlinks(current)
 		if err == nil {
-			for i := len(missing) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, missing[i])
+			for _, segment := range slices.Backward(missing) {
+				resolved = filepath.Join(resolved, segment)
 			}
 			return filepath.Clean(resolved)
 		}
@@ -254,20 +254,4 @@ func hasPathSuffix(parts []string, suffix ...string) bool {
 		}
 	}
 	return true
-}
-
-func containsOrdered(parts []string, sequence ...string) bool {
-	if len(sequence) == 0 {
-		return true
-	}
-	next := 0
-	for _, part := range parts {
-		if part == sequence[next] {
-			next++
-			if next == len(sequence) {
-				return true
-			}
-		}
-	}
-	return false
 }

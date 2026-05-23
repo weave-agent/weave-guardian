@@ -113,11 +113,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 10
 
 ### Task 10: Verify acceptance criteria
-- [ ] verify all built-in profiles produce expected decisions for representative fixtures
-- [ ] verify hard block examples cannot be bypassed by session grants
-- [ ] run full test suite with `go test ./...`
-- [ ] run linter if configured
-- [ ] update README.md with guardian behavior and configuration
+- [x] verify all built-in profiles produce expected decisions for representative fixtures
+- [x] verify hard block examples cannot be bypassed by session grants
+- [x] run full test suite with `go test ./...`
+- [x] run linter if configured
+- [x] update README.md with guardian behavior and configuration
 
 ## Technical Details
 

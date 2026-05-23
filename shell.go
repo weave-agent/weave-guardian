@@ -1,6 +1,7 @@
 package guardian
 
 import (
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -9,7 +10,7 @@ const (
 	actionCommandExecLocal   = "command.exec_local"
 	actionCommandExecRemote  = "command.exec_remote"
 	actionCommandObfuscated  = "command.obfuscated"
-	actionSecretExfiltrate   = "secret.exfiltrate"
+	actionSecretExfiltrate   = "secret.exfiltrate" //nolint:gosec // Action names mention secrets but are policy taxonomy, not credentials.
 	shellUnsupportedSyntaxID = "unsupported shell syntax"
 )
 
@@ -66,7 +67,7 @@ func classifyExecCommandActions(command string) []string {
 	return stageActions
 }
 
-func classifyShellStage(stage shellStage) string {
+func classifyShellStage(stage shellStage) string { //nolint:gocyclo // Command family classification is intentionally centralized.
 	if len(stage.Tokens) == 0 {
 		if hasWriteRedirect(stage.Redirects) {
 			return actionCommandWrite
@@ -170,7 +171,7 @@ func commandActionRank(actionType string) int {
 }
 
 func detectCompositionAction(stages []shellStage, actions []string) string {
-	for i := 0; i < len(stages)-1; i++ {
+	for i := range len(stages) - 1 {
 		if stages[i].Operator != "|" {
 			continue
 		}
@@ -237,7 +238,7 @@ func isShellFileArg(arg string) bool {
 	return !strings.Contains(arg, "://")
 }
 
-func classifyGitCommand(args []string) string {
+func classifyGitCommand(args []string) string { //nolint:gocyclo // Git subcommands map to one taxonomy in a single switch.
 	if len(args) == 0 {
 		return actionGitRead
 	}
@@ -309,7 +310,7 @@ func hasCheckoutPathspec(args []string) bool {
 	return false
 }
 
-func classifyNetworkCommand(name string, args []string) string {
+func classifyNetworkCommand(name string, args []string) string { //nolint:gocyclo // HTTP clients expose several equivalent write indicators.
 	if name == "wget" && (hasLongFlag(args, "post-data") || hasLongFlag(args, "post-file") || hasLongFlag(args, "body-data") || hasLongFlag(args, "body-file")) {
 		return actionNetworkWrite
 	}
@@ -545,7 +546,7 @@ func pipInstallTargetsGlobal(args []string) bool {
 }
 
 func pythonModule(args []string) (string, []string, bool) {
-	for i := 0; i < len(args); i++ {
+	for i := range args {
 		arg := args[i]
 		if arg == "-m" {
 			if i+1 < len(args) {
@@ -651,10 +652,8 @@ func hasLongFlag(args []string, flag string) bool {
 
 func hasAnyArg(args []string, wants ...string) bool {
 	for _, arg := range args {
-		for _, want := range wants {
-			if arg == want {
-				return true
-			}
+		if slices.Contains(wants, arg) {
+			return true
 		}
 	}
 	return false

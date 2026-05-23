@@ -3,6 +3,7 @@ package guardian
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -13,6 +14,8 @@ const (
 	extensionName = "guardian"
 
 	defaultProfile         = "ask"
+	autoProfile            = "auto"
+	yoloProfile            = "yolo"
 	defaultApprovalTimeout = 2 * time.Minute
 	defaultDecisionLimit   = 100
 
@@ -74,7 +77,7 @@ type DecisionRecord struct {
 	Timestamp  string
 }
 
-func init() {
+func init() { //nolint:gochecknoinits // SDK extensions register themselves during package initialization.
 	sdk.RegisterExtensionWithScope[Config](extensionName, extensionName, func(sdkCfg sdk.Config, _ sdk.PreferenceReader, cfg Config) (sdk.Extension, error) {
 		return newGuardian(cfg, sdkCfg.IsHeadless()), nil
 	})
@@ -142,7 +145,7 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 		return decision, nil
 	}
 
-	if grant, ok := g.matchingGrant(req, decision); ok {
+	if grant, ok := g.matchingGrant(decision); ok {
 		decision.Action = sdk.GuardianDecisionAllow
 		decision.Reason = fmt.Sprintf("allowed by %s grant", grant.Scope)
 		decision.MatchedGrantID = grant.ID
@@ -335,7 +338,7 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 
 	profile := policyProfile{
 		name:        name,
-		description: fmt.Sprintf("Custom profile extending %s", base.name),
+		description: "Custom profile extending " + base.name,
 		rules:       rules,
 	}
 	profiles[name] = profile
@@ -345,7 +348,7 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 }
 
 func builtInProfiles() map[string]policyProfile {
-	hardBlocks := map[string]string{
+	hardBlocks := map[string]string{ //nolint:gosec // Action names mention secrets but are policy taxonomy, not credentials.
 		"command.exec_remote":      "remote code execution is blocked",
 		"command.obfuscated":       "obfuscated command payloads are blocked",
 		"command.dangerous_delete": "dangerous delete operations are blocked",
@@ -393,12 +396,12 @@ func builtInProfiles() map[string]policyProfile {
 		"package.install",
 		"package.script",
 	} {
-		autoRules[actionType] = allowRule(fmt.Sprintf("%s is allowed by auto profile", actionType))
+		autoRules[actionType] = allowRule(actionType + " is allowed by auto profile")
 	}
 
 	yoloRules := make(map[string]policyRule, len(askRules))
 	for actionType := range askRules {
-		yoloRules[actionType] = allowRule(fmt.Sprintf("%s is allowed by yolo profile", actionType))
+		yoloRules[actionType] = allowRule(actionType + " is allowed by yolo profile")
 	}
 	yoloRules["unknown"] = allowRule("unknown actions are allowed by yolo profile")
 	for actionType, reason := range hardBlocks {
@@ -406,18 +409,18 @@ func builtInProfiles() map[string]policyProfile {
 	}
 
 	return map[string]policyProfile{
-		"ask": {
-			name:        "ask",
+		defaultProfile: {
+			name:        defaultProfile,
 			description: "Conservative profile that asks before mutating or risky actions",
 			rules:       askRules,
 		},
-		"auto": {
-			name:        "auto",
+		autoProfile: {
+			name:        autoProfile,
 			description: "Productive profile that allows routine development actions and asks for risky actions",
 			rules:       autoRules,
 		},
-		"yolo": {
-			name:        "yolo",
+		yoloProfile: {
+			name:        yoloProfile,
 			description: "Permissive profile that still enforces hard blocks",
 			rules:       yoloRules,
 		},
@@ -547,7 +550,7 @@ func (g *Guardian) waitForResolution(ctx context.Context, pending *pendingApprov
 	}
 }
 
-func (g *Guardian) matchingGrant(req sdk.GuardianRequest, decision sdk.GuardianDecision) (sdk.GuardianGrant, bool) {
+func (g *Guardian) matchingGrant(decision sdk.GuardianDecision) (sdk.GuardianGrant, bool) {
 	actionType, _ := decision.Metadata[actionTypeMetadataKey].(string)
 	if actionType == "" {
 		return sdk.GuardianGrant{}, false
@@ -712,9 +715,8 @@ func blockRule(reason string) policyRule {
 
 func copyRules(in map[string]policyRule) map[string]policyRule {
 	out := make(map[string]policyRule, len(in))
-	for actionType, rule := range in {
-		out[actionType] = rule
-	}
+	maps.Copy(out, in)
+
 	return out
 }
 
