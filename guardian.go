@@ -26,6 +26,7 @@ const (
 // Config holds guardian extension settings.
 type Config struct {
 	Profile         string                         `json:"profile" default:"ask" env:"PROFILE" description:"Active guardian policy profile"`
+	AskFallback     bool                           `json:"ask_fallback,omitempty" env:"ASK_FALLBACK" description:"Ask instead of blocking when no guardian policy matches"`
 	ApprovalTimeout string                         `json:"approval_timeout,omitempty" default:"2m" description:"How long to wait for ask-mode approval before denying"`
 	Profiles        map[string]sdk.GuardianProfile `json:"profiles,omitempty" description:"Custom guardian policy profiles"`
 }
@@ -256,7 +257,10 @@ type pendingApproval struct {
 }
 
 func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision {
-	actionTypes := requestActionTypes(req)
+	return g.policyDecisionForActionTypes(req, requestActionTypes(req))
+}
+
+func (g *Guardian) policyDecisionForActionTypes(req sdk.GuardianRequest, actionTypes []string) sdk.GuardianDecision {
 	profileName := g.cfg.Profile
 	profile := g.profiles[profileName]
 
@@ -272,8 +276,12 @@ func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision 
 			ok = true
 		}
 		if !ok {
+			decision := sdk.GuardianDecisionBlock
+			if g.cfg.AskFallback {
+				decision = sdk.GuardianDecisionAsk
+			}
 			candidateRule = policyRule{
-				decision: sdk.GuardianDecisionBlock,
+				decision: decision,
 				reason:   fmt.Sprintf("%s has no policy rule in profile %s", candidateType, profile.name),
 			}
 		}
@@ -390,13 +398,19 @@ func profileRuleActionTypes(rule sdk.GuardianProfileRule) []string {
 	for _, action := range rule.Actions {
 		switch action {
 		case sdk.GuardianActionRead:
-			types = append(types, actionFileRead)
+			types = append(types, actionFileRead, actionPolicyRead, actionSecretRead, actionGitRead, actionCommandRead)
 		case sdk.GuardianActionWrite:
-			types = append(types, actionFileWrite)
+			types = append(types, actionFileWrite, actionFileProtected, actionPolicyWrite, actionGitWrite, actionGitDiscard,
+				actionGitRemoteWrite, actionGitHistoryRewrite, actionCommandWrite, actionPackageInstall, actionPackageGlobal,
+				actionPackageScript, actionSystemSignal, actionSystemService)
 		case sdk.GuardianActionDelete:
-			types = append(types, actionFileDelete)
+			types = append(types, actionFileDelete, actionGitDiscard, actionCommandDangerousDelete)
 		case sdk.GuardianActionExec:
-			types = append(types, actionCommandExecLocal)
+			types = append(types, actionCommandRead, actionCommandWrite, actionCommandExecLocal, actionCommandExecRemote,
+				actionCommandObfuscated, actionCommandDangerousDelete, actionGitRead, actionGitWrite, actionGitDiscard,
+				actionGitRemoteWrite, actionGitHistoryRewrite, actionNetworkRead, actionNetworkWrite, actionPackageTest,
+				actionPackageBuild, actionPackageInstall, actionPackageGlobal, actionPackageScript, actionSystemSignal,
+				actionSystemService, actionSecretRead, actionSecretExfiltrate, actionPolicyWrite, actionFileProtected)
 		case sdk.GuardianActionNetwork:
 			types = append(types, actionNetworkRead, actionNetworkWrite)
 		case sdk.GuardianActionUnknown:
@@ -716,12 +730,6 @@ func resolutionReason(resolution sdk.GuardianResolution, fallback string) string
 }
 
 func requestActionTypes(req sdk.GuardianRequest) []string {
-	if req.Action == sdk.GuardianActionUnknown && req.Metadata != nil {
-		if actionType, ok := metadataActionType(req.Metadata); ok {
-			return []string{actionType}
-		}
-	}
-
 	if req.Action == sdk.GuardianActionExec {
 		return classifyExecCommandActionsInWorkingDir(req.Command, req.WorkingDir)
 	}

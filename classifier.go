@@ -222,18 +222,30 @@ func isProtectedPath(path classifiedPath) bool {
 		return true
 	}
 
+	resolved := filepath.ToSlash(strings.ToLower(path.resolved))
 	if runtime.GOOS == "windows" {
-		return false
+		return isWindowsProtectedPath(resolved)
 	}
 
-	protectedRoots := []string{"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/private/etc", "/sbin", "/system", "/usr"}
-	resolved := filepath.ToSlash(strings.ToLower(path.resolved))
+	protectedRoots := []string{"/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/private/etc", "/sbin", "/system", "/usr"}
 	for _, root := range protectedRoots {
 		if resolved == root || strings.HasPrefix(resolved, root+"/") {
 			return true
 		}
 	}
 
+	return false
+}
+
+func isWindowsProtectedPath(resolved string) bool {
+	protectedRoots := []string{
+		"c:/", "c:/windows", "c:/program files", "c:/program files (x86)", "c:/programdata",
+	}
+	for _, root := range protectedRoots {
+		if resolved == root || strings.HasPrefix(resolved, strings.TrimRight(root, "/")+"/") {
+			return true
+		}
+	}
 	return false
 }
 

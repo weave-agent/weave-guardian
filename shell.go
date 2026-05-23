@@ -14,6 +14,8 @@ const (
 	actionSecretExfiltrate   = "secret.exfiltrate" //nolint:gosec // Action names mention secrets but are policy taxonomy, not credentials.
 	shellUnsupportedSyntaxID = "unsupported shell syntax"
 	shellOptionTerminator    = "--"
+	commandCurl              = "curl"
+	commandWget              = "wget"
 )
 
 type shellCommand struct {
@@ -65,7 +67,7 @@ func classifyExecCommandActionsInWorkingDir(command, workingDir string) []string
 	for _, stage := range parsed.Stages {
 		stageActions = append(stageActions, classifyShellStage(stage, workingDir))
 	}
-	if compositionAction := detectCompositionAction(parsed.Stages, stageActions); compositionAction != "" {
+	if compositionAction := detectCompositionAction(parsed.Stages, stageActions, workingDir); compositionAction != "" {
 		stageActions = append(stageActions, compositionAction)
 	}
 
@@ -74,6 +76,14 @@ func classifyExecCommandActionsInWorkingDir(command, workingDir string) []string
 
 func classifyShellStage(stage shellStage, workingDir string) string {
 	actionType := classifyShellStageBase(stage, workingDir)
+	if redirectReadAction, ok := classifyRedirectReads(stage.Redirects, workingDir); ok {
+		if actionType == actionNetworkWrite && redirectReadAction == actionSecretRead {
+			return actionSecretExfiltrate
+		}
+		if commandActionRank(redirectReadAction) > commandActionRank(actionType) {
+			return redirectReadAction
+		}
+	}
 	if redirectAction, ok := classifyRedirectWrites(stage.Redirects, workingDir); ok && commandActionRank(redirectAction) > commandActionRank(actionType) {
 		return redirectAction
 	}
@@ -129,7 +139,7 @@ func classifyShellStageBase(stage shellStage, workingDir string) string { //noli
 			return actionType
 		}
 		return actionCommandRead
-	case "curl", "wget":
+	case commandCurl, commandWget:
 		return classifyNetworkCommand(name, args, workingDir)
 	case "http", "https":
 		return classifyHTTPieCommand(args)
@@ -192,10 +202,15 @@ func commandActionRank(actionType string) int {
 	}
 }
 
-func detectCompositionAction(stages []shellStage, actions []string) string {
+func detectCompositionAction(stages []shellStage, actions []string, workingDir string) string {
 	secretTainted := false
 	networkTainted := false
+	downloadedPaths := map[string]struct{}{}
 	for i := range len(stages) - 1 {
+		stageDownloadsNetworkRead(stages[i], actions[i], workingDir, downloadedPaths)
+		if stageExecutesDownloadedPath(stages[i+1], workingDir, downloadedPaths) {
+			return actionCommandExecRemote
+		}
 		if stages[i].Operator != "|" {
 			secretTainted = false
 			networkTainted = false
@@ -214,6 +229,51 @@ func detectCompositionAction(stages []shellStage, actions []string) string {
 		}
 	}
 	return ""
+}
+
+func stageDownloadsNetworkRead(stage shellStage, action, workingDir string, downloadedPaths map[string]struct{}) bool {
+	if len(stage.Tokens) == 0 || action != actionCommandWrite {
+		return false
+	}
+	name := normalizedCommandName(stage.Tokens[0])
+	if name != commandCurl && name != commandWget {
+		return false
+	}
+	args := stage.Tokens[1:]
+	if classifyNetworkRequestAction(name, args, workingDir) != actionNetworkRead {
+		return false
+	}
+	for i := range args {
+		output, ok := networkOutputTarget(name, strings.ToLower(args[i]), args, i)
+		if !ok || output == "" || isStdoutTarget(output) {
+			continue
+		}
+		downloadedPaths[normalizeShellPathForMatch(output, workingDir)] = struct{}{}
+		return true
+	}
+	return false
+}
+
+func stageExecutesDownloadedPath(stage shellStage, workingDir string, downloadedPaths map[string]struct{}) bool {
+	if len(downloadedPaths) == 0 || len(stage.Tokens) == 0 {
+		return false
+	}
+	if isExecutionSink(stage) {
+		for _, arg := range stage.Tokens[1:] {
+			if _, ok := downloadedPaths[normalizeShellPathForMatch(arg, workingDir)]; ok {
+				return true
+			}
+		}
+	}
+	_, ok := downloadedPaths[normalizeShellPathForMatch(stage.Tokens[0], workingDir)]
+	return ok
+}
+
+func normalizeShellPathForMatch(path, workingDir string) string {
+	if workingDir != "" && !filepath.IsAbs(path) {
+		path = filepath.Join(workingDir, path)
+	}
+	return filepath.Clean(path)
 }
 
 func isExecutionSink(stage shellStage) bool {
@@ -362,10 +422,10 @@ func classifyNetworkRequestAction(name string, args []string, workingDir string)
 	if networkUploadReferencesSensitivePath(name, args, workingDir) {
 		return actionSecretExfiltrate
 	}
-	if name == "wget" && (hasLongFlag(args, "post-data") || hasLongFlag(args, "post-file") || hasLongFlag(args, "body-data") || hasLongFlag(args, "body-file")) {
+	if name == commandWget && (hasLongFlag(args, "post-data") || hasLongFlag(args, "post-file") || hasLongFlag(args, "body-data") || hasLongFlag(args, "body-file")) {
 		return actionNetworkWrite
 	}
-	if name == "curl" && hasCurlUploadFile(args) {
+	if name == commandCurl && hasCurlUploadFile(args) {
 		return actionNetworkWrite
 	}
 	for i, arg := range args {
@@ -647,6 +707,19 @@ func classifyRedirectWrites(redirects []shellRedirect, workingDir string) (strin
 	return "", false
 }
 
+func classifyRedirectReads(redirects []shellRedirect, workingDir string) (string, bool) {
+	for _, redirect := range redirects {
+		if !strings.Contains(redirect.Operator, "<") || redirect.Operator == "<>" || redirect.Target == "" {
+			continue
+		}
+		if isSensitiveShellPath(redirect.Target, workingDir) {
+			return actionSecretRead, true
+		}
+		return actionCommandRead, true
+	}
+	return "", false
+}
+
 func classifyShellPathAction(args []string, fallback, workingDir string) (string, bool) {
 	found := false
 	for _, arg := range args {
@@ -733,18 +806,18 @@ func isStdoutTarget(target string) bool {
 
 func networkOutputTarget(name, arg string, args []string, index int) (string, bool) {
 	switch {
-	case arg == "-o" || arg == "--output" || (name == "wget" && arg == "-O"):
+	case arg == "-o" || arg == "--output" || (name == commandWget && arg == "-O"):
 		if index+1 < len(args) {
 			return args[index+1], true
 		}
 		return "", true
 	case strings.HasPrefix(arg, "--output="):
 		return args[index][len("--output="):], true
-	case name == "curl" && strings.HasPrefix(arg, "-o") && len(arg) > 2:
+	case name == commandCurl && strings.HasPrefix(arg, "-o") && len(arg) > 2:
 		return args[index][2:], true
-	case name == "wget" && strings.HasPrefix(arg, "-O") && len(arg) > 2:
+	case name == commandWget && strings.HasPrefix(arg, "-O") && len(arg) > 2:
 		return args[index][2:], true
-	case name == "curl" && (arg == "-O" || arg == "--remote-name" || arg == "--remote-header-name"):
+	case name == commandCurl && (arg == "-O" || arg == "--remote-name" || arg == "--remote-header-name"):
 		return "", true
 	default:
 		return "", false
@@ -856,15 +929,15 @@ func networkUploadReferencesSensitivePath(name string, args []string, workingDir
 		if sensitiveNetworkUploadValue(networkFlagValue(lower, arg, args, i), workingDir) {
 			return true
 		}
-		if name == "curl" {
+		if name == commandCurl {
 			if uploadFile, ok := curlUploadFileValue(lower, arg, args, i); ok && isSensitiveShellPath(uploadFile, workingDir) {
 				return true
 			}
 		}
-		if name == "wget" && strings.HasPrefix(lower, "--post-file=") && isSensitiveShellPath(arg[len("--post-file="):], workingDir) {
+		if name == commandWget && strings.HasPrefix(lower, "--post-file=") && isSensitiveShellPath(arg[len("--post-file="):], workingDir) {
 			return true
 		}
-		if name == "wget" && lower == "--post-file" && i+1 < len(args) && isSensitiveShellPath(args[i+1], workingDir) {
+		if name == commandWget && lower == "--post-file" && i+1 < len(args) && isSensitiveShellPath(args[i+1], workingDir) {
 			return true
 		}
 	}
