@@ -1,0 +1,187 @@
+version: "2"
+run:
+  concurrency: 4
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - copyloopvar
+    - dupl
+    - durationcheck
+    - errcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - godoclint
+    - gosec
+    - govet
+    - ineffassign
+    - intrange
+    - makezero
+    - misspell
+    - modernize
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - perfsprint
+    - predeclared
+    - prealloc
+    - reassign
+    - revive
+    - sqlclosecheck
+    - staticcheck
+    - testifylint
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+    - wrapcheck
+    - wsl_v5
+
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    dupl:
+      threshold: 100
+    goconst:
+      min-len: 2
+      min-occurrences: 7
+    gocritic:
+      disabled-checks:
+        - wrapperFunc
+        - hugeParam
+        - rangeValCopy
+      enabled-tags:
+        - performance
+        - style
+        - experimental
+    gocyclo:
+      min-complexity: 20
+    govet:
+      enable:
+        - shadow
+    lll:
+      line-length: 140
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: early-return
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: empty-block
+        - name: redefines-builtin-id
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - golint
+        text: should have a package comment, unless it's in another file for this package
+      - linters:
+          - gocritic
+        text: "exitAfterDefer:"
+      - linters:
+          - gocritic
+        text: "whyNoLint: include an explanation for nolint directive"
+      - linters:
+          - revive
+        text: should have a package comment
+      - linters:
+          - staticcheck
+        text: at least one file in a package should have a package comment
+      - linters:
+          - gocritic
+        text: "commentedOutCode: may want to remove commented-out code"
+      - linters:
+          - gocritic
+        text: "unnamedResult: consider giving a name to these results"
+      - linters:
+          - revive
+        text: "var-naming: don't use an underscore in package name"
+      - linters:
+          - staticcheck
+        text: should not use underscores in package names
+      - linters:
+          - govet
+        text: struct literal uses unkeyed fields
+      - linters:
+          - revive
+          - unparam
+          - unused
+        path: _test\.go$
+        text: unused-parameter
+      - linters:
+          - dupl
+          - goconst
+          - noctx
+          - usestdlibvars
+        path: _test\.go$
+      - linters:
+          - gocritic
+        path: _mock_test\.go$
+      - linters:
+          - gosec
+        text: "G204:"
+      - linters:
+          - gosec
+        text: "G302:"
+      - linters:
+          - gosec
+        text: "G304:"
+      - linters:
+          - gosec
+        path: _test\.go$
+        text: "G301:"
+      - linters:
+          - gosec
+        path: _test\.go$
+        text: "G306:"
+      - linters:
+          - errcheck
+        text: "Error return value of .*.Close.*is not checked"
+    paths:
+      - vendor
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/weave-agent/weave-guardian
+
+    gofumpt:
+      module-path: github.com/weave-agent/weave-guardian
+      extra-rules: true
