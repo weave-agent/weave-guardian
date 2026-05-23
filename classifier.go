@@ -52,10 +52,24 @@ func classifyRequest(req sdk.GuardianRequest) string {
 	case sdk.GuardianActionExec:
 		return classifyExecCommand(req.Command)
 	case sdk.GuardianActionNetwork:
-		return actionNetworkRead
+		return classifyNetworkAction(req)
 	default:
 		return actionUnknown
 	}
+}
+
+func classifyNetworkAction(req sdk.GuardianRequest) string {
+	if actionType, ok := metadataActionType(req.Metadata); ok {
+		switch actionType {
+		case actionNetworkRead, actionNetworkWrite:
+			return actionType
+		}
+	}
+	method := metadataString(req.Metadata, "method", "http_method", "http.method")
+	if isWriteHTTPMethod(method) {
+		return actionNetworkWrite
+	}
+	return actionNetworkRead
 }
 
 func classifyFileAction(req sdk.GuardianRequest) string {

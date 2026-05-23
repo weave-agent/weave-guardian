@@ -231,16 +231,20 @@ func (g *Guardian) resolve(decisionID string, resolution sdk.GuardianResolution,
 
 func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	g.mu.Lock()
-	grants := append([]sdk.GuardianGrant(nil), g.grants...)
+	grants := make([]sdk.GuardianGrant, 0, len(g.grants))
+	for _, grant := range g.grants {
+		grants = append(grants, cloneGuardianGrant(grant))
+	}
 	pending := make([]sdk.GuardianApproval, 0, len(g.pending))
 	for _, approval := range g.pending {
-		pending = append(pending, approval.approval)
+		pending = append(pending, cloneGuardianApproval(approval.approval))
 	}
+	profiles := cloneSDKProfiles(sdkProfiles(g.profiles))
 	g.mu.Unlock()
 
 	return sdk.GuardianSnapshot{
 		CurrentProfile: g.cfg.Profile,
-		Profiles:       sdkProfiles(g.profiles),
+		Profiles:       profiles,
 		Grants:         grants,
 		Pending:        pending,
 	}, nil
@@ -653,10 +657,8 @@ func resolutionReason(resolution sdk.GuardianResolution, fallback string) string
 
 func requestActionTypes(req sdk.GuardianRequest) []string {
 	if req.Action == sdk.GuardianActionUnknown && req.Metadata != nil {
-		if raw, ok := req.Metadata[actionTypeMetadataKey]; ok {
-			if actionType, ok := raw.(string); ok && actionType != "" {
-				return []string{actionType}
-			}
+		if actionType, ok := metadataActionType(req.Metadata); ok {
+			return []string{actionType}
 		}
 	}
 
@@ -665,6 +667,54 @@ func requestActionTypes(req sdk.GuardianRequest) []string {
 	}
 
 	return []string{classifyRequest(req)}
+}
+
+func metadataActionType(metadata map[string]any) (string, bool) {
+	actionType := metadataString(metadata, actionTypeMetadataKey)
+	return actionType, actionType != ""
+}
+
+func metadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		if value, ok := raw.(string); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func cloneGuardianGrant(grant sdk.GuardianGrant) sdk.GuardianGrant {
+	grant.Request = cloneGuardianRequest(grant.Request)
+	return grant
+}
+
+func cloneGuardianApproval(approval sdk.GuardianApproval) sdk.GuardianApproval {
+	approval.Request = cloneGuardianRequest(approval.Request)
+	approval.AllowedScopes = append([]sdk.GuardianGrantScope(nil), approval.AllowedScopes...)
+	return approval
+}
+
+func cloneGuardianRequest(req sdk.GuardianRequest) sdk.GuardianRequest {
+	req.Metadata = maps.Clone(req.Metadata)
+	return req
+}
+
+func cloneSDKProfiles(profiles map[string]sdk.GuardianProfile) map[string]sdk.GuardianProfile {
+	out := make(map[string]sdk.GuardianProfile, len(profiles))
+	for name, profile := range profiles {
+		profile.Metadata = maps.Clone(profile.Metadata)
+		profile.Rules = append([]sdk.GuardianProfileRule(nil), profile.Rules...)
+		for i := range profile.Rules {
+			profile.Rules[i].Actions = append([]sdk.GuardianAction(nil), profile.Rules[i].Actions...)
+			profile.Rules[i].Metadata = maps.Clone(profile.Rules[i].Metadata)
+		}
+		out[name] = profile
+	}
+	return out
 }
 
 func grantActionType(req sdk.GuardianRequest) string {

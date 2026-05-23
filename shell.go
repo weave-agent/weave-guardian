@@ -1,6 +1,7 @@
 package guardian
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -12,6 +13,7 @@ const (
 	actionCommandObfuscated  = "command.obfuscated"
 	actionSecretExfiltrate   = "secret.exfiltrate" //nolint:gosec // Action names mention secrets but are policy taxonomy, not credentials.
 	shellUnsupportedSyntaxID = "unsupported shell syntax"
+	shellOptionTerminator    = "--"
 )
 
 type shellCommand struct {
@@ -75,7 +77,7 @@ func classifyShellStage(stage shellStage) string { //nolint:gocyclo // Command f
 	}
 
 	tokens := stage.Tokens
-	name := strings.ToLower(tokens[0])
+	name := normalizedCommandName(tokens[0])
 	args := tokens[1:]
 
 	switch name {
@@ -203,7 +205,7 @@ func isExecutionSink(stage shellStage) bool {
 	if len(stage.Tokens) == 0 {
 		return false
 	}
-	switch strings.ToLower(stage.Tokens[0]) {
+	switch normalizedCommandName(stage.Tokens[0]) {
 	case "bash", "sh", "zsh", "fish", "python", "python3", "py", "perl", "ruby", "node", "deno", "php":
 		return true
 	default:
@@ -215,7 +217,7 @@ func isDecodeStage(stage shellStage) bool {
 	if len(stage.Tokens) == 0 {
 		return false
 	}
-	name := strings.ToLower(stage.Tokens[0])
+	name := normalizedCommandName(stage.Tokens[0])
 	switch name {
 	case "base64", "xxd", "openssl", "certutil":
 		return hasAnyArg(stage.Tokens[1:], "-d", "--decode", "-decode", "enc") || hasShortFlag(stage.Tokens[1:], "d")
@@ -314,7 +316,7 @@ func gitConfigWrites(args []string) bool {
 
 func hasCheckoutPathspec(args []string) bool {
 	for i, arg := range args {
-		if arg == "--" && i+1 < len(args) {
+		if arg == shellOptionTerminator && i+1 < len(args) {
 			return true
 		}
 	}
@@ -543,7 +545,7 @@ func classifyPackageScript(args []string) string {
 
 func firstNonFlagArg(args []string) (string, []string) {
 	for i, arg := range args {
-		if arg == "--" {
+		if arg == shellOptionTerminator {
 			if i+1 < len(args) {
 				return args[i+1], args[i+2:]
 			}
@@ -646,7 +648,7 @@ func shellPathArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := range args {
 		arg := args[i]
-		if arg == "--" {
+		if arg == shellOptionTerminator {
 			out = append(out, args[i+1:]...)
 			break
 		}
@@ -676,6 +678,9 @@ func classifyNetworkOutputWrite(name string, args []string) (string, bool) {
 		arg := args[i]
 		lower := strings.ToLower(arg)
 		if output, ok := networkOutputTarget(name, lower, args, i); ok {
+			if isStdoutTarget(output) {
+				return actionNetworkRead, true
+			}
 			if output == "" {
 				return actionCommandWrite, true
 			}
@@ -683,6 +688,15 @@ func classifyNetworkOutputWrite(name string, args []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func isStdoutTarget(target string) bool {
+	switch target {
+	case "-", "/dev/stdout", "/proc/self/fd/1", "/dev/fd/1":
+		return true
+	default:
+		return false
+	}
 }
 
 func networkOutputTarget(name, arg string, args []string, index int) (string, bool) {
@@ -817,7 +831,9 @@ func decomposeShellCommand(command string) shellCommand {
 	stages, issues := splitShellStages(tokens)
 	parsed.Issues = append(parsed.Issues, issues...)
 	for _, stage := range stages {
-		parsed.Stages = append(parsed.Stages, unwrapShellStage(stage)...)
+		unwrapped, issues := unwrapShellStage(stage)
+		parsed.Issues = append(parsed.Issues, issues...)
+		parsed.Stages = append(parsed.Stages, unwrapped...)
 	}
 
 	return parsed
@@ -958,22 +974,22 @@ func splitShellStages(tokens []string) ([]shellStage, []string) {
 	return stages, issues
 }
 
-func unwrapShellStage(stage shellStage) []shellStage {
+func unwrapShellStage(stage shellStage) ([]shellStage, []string) {
 	if len(stage.Tokens) == 0 {
-		return []shellStage{stage}
+		return []shellStage{stage}, nil
 	}
 
 	tokens := stage.Tokens
-	switch tokens[0] {
+	switch normalizedCommandName(tokens[0]) {
 	case "bash", "sh", "zsh":
 		if script, ok := shellWrapperScript(tokens[1:]); ok {
 			parsed := decomposeShellCommand(script)
 			if len(parsed.Stages) == 0 {
-				return []shellStage{{Tokens: []string{script}, Operator: stage.Operator, Redirects: stage.Redirects}}
+				return []shellStage{{Tokens: []string{script}, Operator: stage.Operator, Redirects: stage.Redirects}}, parsed.Issues
 			}
 			parsed.Stages[len(parsed.Stages)-1].Operator = stage.Operator
 			parsed.Stages[0].Redirects = append(stage.Redirects, parsed.Stages[0].Redirects...)
-			return parsed.Stages
+			return parsed.Stages, parsed.Issues
 		}
 	case "eval":
 		if len(tokens) > 1 {
@@ -981,22 +997,47 @@ func unwrapShellStage(stage shellStage) []shellStage {
 			if len(parsed.Stages) > 0 {
 				parsed.Stages[len(parsed.Stages)-1].Operator = stage.Operator
 				parsed.Stages[0].Redirects = append(stage.Redirects, parsed.Stages[0].Redirects...)
-				return parsed.Stages
+				return parsed.Stages, parsed.Issues
 			}
+			return []shellStage{stage}, parsed.Issues
 		}
 	case "command":
 		if unwrapped, ok := unwrapCommandBuiltin(tokens); ok {
 			stage.Tokens = unwrapped
-			return []shellStage{stage}
+			return []shellStage{stage}, nil
+		}
+	case "sudo", "doas", "nohup":
+		if unwrapped, ok := unwrapLeadingOptions(tokens[1:]); ok {
+			stage.Tokens = unwrapped
+			return []shellStage{stage}, nil
+		}
+	case "env":
+		if unwrapped, ok := unwrapEnvCommand(tokens[1:]); ok {
+			stage.Tokens = unwrapped
+			return []shellStage{stage}, nil
+		}
+	case "nice":
+		if unwrapped, ok := unwrapNiceCommand(tokens[1:]); ok {
+			stage.Tokens = unwrapped
+			return []shellStage{stage}, nil
+		}
+	case "xargs":
+		if unwrapped, ok := unwrapXargsCommand(tokens[1:]); ok {
+			stage.Tokens = unwrapped
+			return []shellStage{stage}, nil
 		}
 	}
 
-	return []shellStage{stage}
+	return []shellStage{stage}, nil
+}
+
+func normalizedCommandName(name string) string {
+	return strings.ToLower(filepath.Base(name))
 }
 
 func shellWrapperScript(args []string) (string, bool) {
 	for i, arg := range args {
-		if arg == "--" {
+		if arg == shellOptionTerminator {
 			continue
 		}
 		if arg == "-c" {
@@ -1030,6 +1071,92 @@ func unwrapCommandBuiltin(tokens []string) ([]string, bool) {
 		return nil, false
 	}
 	return tokens[i:], true
+}
+
+func unwrapLeadingOptions(args []string) ([]string, bool) {
+	for i, arg := range args {
+		if arg == shellOptionTerminator {
+			if i+1 < len(args) {
+				return args[i+1:], true
+			}
+			return nil, false
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return args[i:], true
+	}
+	return nil, false
+}
+
+func unwrapEnvCommand(args []string) ([]string, bool) {
+	for i, arg := range args {
+		if arg == shellOptionTerminator {
+			if i+1 < len(args) {
+				return args[i+1:], true
+			}
+			return nil, false
+		}
+		if strings.HasPrefix(arg, "-") || strings.Contains(arg, "=") {
+			continue
+		}
+		return args[i:], true
+	}
+	return nil, false
+}
+
+func unwrapNiceCommand(args []string) ([]string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == shellOptionTerminator {
+			if i+1 < len(args) {
+				return args[i+1:], true
+			}
+			return nil, false
+		}
+		if arg == "-n" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-n") || strings.HasPrefix(arg, "--adjustment") {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return args[i:], true
+	}
+	return nil, false
+}
+
+func unwrapXargsCommand(args []string) ([]string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == shellOptionTerminator {
+			if i+1 < len(args) {
+				return args[i+1:], true
+			}
+			return nil, false
+		}
+		if xargsOptionConsumesValue(arg) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return args[i:], true
+	}
+	return nil, false
+}
+
+func xargsOptionConsumesValue(arg string) bool {
+	switch arg {
+	case "-I", "-L", "-n", "-P", "-s", "-E":
+		return true
+	default:
+		return false
+	}
 }
 
 func isStageSeparator(token string) bool {
