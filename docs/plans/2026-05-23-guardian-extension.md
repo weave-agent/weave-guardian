@@ -48,11 +48,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 ## Implementation Steps
 
 ### Task 1: Scaffold guardian extension module
-- [ ] create `go.mod` for `github.com/weave-agent/weave-guardian`
-- [ ] create extension entry point registering `guardian` with config scope `guardian`
-- [ ] publish `guardian.registered` during `Subscribe`
-- [ ] write tests for registration, config loading, and bus registration event
-- [ ] run `go test ./...` - must pass before task 2
+- [x] create `go.mod` for `github.com/weave-agent/weave-guardian`
+- [x] create extension entry point registering `guardian` with config scope `guardian`
+- [x] publish `guardian.registered` during `Subscribe`
+- [x] write tests for registration, config loading, and bus registration event
+- [x] run `go test ./...` - must pass before task 2
 
 ### Task 2: Implement profile resolution
 - [ ] define built-in profiles `ask`, `auto`, and `yolo`
