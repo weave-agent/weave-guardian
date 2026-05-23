@@ -79,13 +79,25 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 func (g *Guardian) Close() error { return nil }
 
 func (g *Guardian) Decide(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
-	actionType := requestActionType(req)
+	actionTypes := requestActionTypes(req)
 	profile := g.profiles[g.cfg.Profile]
-	rule, ok := profile.rules[actionType]
-	if !ok {
-		rule = policyRule{
-			decision: sdk.GuardianDecisionBlock,
-			reason:   fmt.Sprintf("%s has no policy rule in profile %s", actionType, profile.name),
+
+	actionType := ""
+	rule := policyRule{
+		decision: sdk.GuardianDecisionAllow,
+		reason:   "all stages allowed",
+	}
+	for _, candidateType := range actionTypes {
+		candidateRule, ok := profile.rules[candidateType]
+		if !ok {
+			candidateRule = policyRule{
+				decision: sdk.GuardianDecisionBlock,
+				reason:   fmt.Sprintf("%s has no policy rule in profile %s", candidateType, profile.name),
+			}
+		}
+		if shouldUseDecision(candidateType, candidateRule, actionType, rule) {
+			actionType = candidateType
+			rule = candidateRule
 		}
 	}
 
@@ -246,27 +258,51 @@ func builtInProfiles() map[string]policyProfile {
 }
 
 func requestActionType(req sdk.GuardianRequest) string {
+	actionTypes := requestActionTypes(req)
+	if len(actionTypes) == 0 {
+		return actionUnknown
+	}
+	return actionTypes[0]
+}
+
+func requestActionTypes(req sdk.GuardianRequest) []string {
 	if req.Metadata != nil {
 		if raw, ok := req.Metadata[actionTypeMetadataKey]; ok {
 			if actionType, ok := raw.(string); ok && actionType != "" {
-				return actionType
+				return []string{actionType}
 			}
 		}
 	}
 
-	switch req.Action {
-	case sdk.GuardianActionRead:
-		return classifyRequest(req)
-	case sdk.GuardianActionWrite:
-		return classifyRequest(req)
-	case sdk.GuardianActionDelete:
-		return classifyRequest(req)
-	case sdk.GuardianActionExec:
-		return classifyRequest(req)
-	case sdk.GuardianActionNetwork:
-		return classifyRequest(req)
+	if req.Action == sdk.GuardianActionExec {
+		return classifyExecCommandActions(req.Command)
+	}
+
+	return []string{classifyRequest(req)}
+}
+
+func shouldUseDecision(candidateType string, candidateRule policyRule, currentType string, currentRule policyRule) bool {
+	if currentType == "" {
+		return true
+	}
+	candidateRank := decisionRank(candidateRule.decision)
+	currentRank := decisionRank(currentRule.decision)
+	if candidateRank != currentRank {
+		return candidateRank > currentRank
+	}
+	return commandActionRank(candidateType) > commandActionRank(currentType)
+}
+
+func decisionRank(decision sdk.GuardianDecisionAction) int {
+	switch decision {
+	case sdk.GuardianDecisionBlock:
+		return 3
+	case sdk.GuardianDecisionAsk:
+		return 2
+	case sdk.GuardianDecisionAllow:
+		return 1
 	default:
-		return classifyRequest(req)
+		return 0
 	}
 }
 

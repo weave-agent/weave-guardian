@@ -90,12 +90,12 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 7
 
 ### Task 7: Implement composition detector and aggregation
-- [ ] detect `network.read | exec` as `command.exec_remote`
-- [ ] detect `secret.read | network.write` as `secret.exfiltrate`
-- [ ] detect decode or obfuscated payload pipelines as `command.obfuscated`
-- [ ] aggregate stage decisions with `block > ask > allow`
-- [ ] write tests for composition rules and multi-stage aggregate decisions
-- [ ] run `go test ./...` - must pass before task 8
+- [x] detect `network.read | exec` as `command.exec_remote`
+- [x] detect `secret.read | network.write` as `secret.exfiltrate`
+- [x] detect decode or obfuscated payload pipelines as `command.obfuscated`
+- [x] aggregate stage decisions with `block > ask > allow`
+- [x] write tests for composition rules and multi-stage aggregate decisions
+- [x] run `go test ./...` - must pass before task 8
 
 ### Task 8: Implement approval lifecycle and session grants
 - [ ] publish ID-based approval requests for ask decisions

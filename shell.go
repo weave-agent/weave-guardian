@@ -7,7 +7,9 @@ import (
 
 const (
 	actionCommandExecLocal   = "command.exec_local"
+	actionCommandExecRemote  = "command.exec_remote"
 	actionCommandObfuscated  = "command.obfuscated"
+	actionSecretExfiltrate   = "secret.exfiltrate"
 	shellUnsupportedSyntaxID = "unsupported shell syntax"
 )
 
@@ -29,23 +31,39 @@ type shellRedirect struct {
 }
 
 func classifyExecCommand(command string) string {
-	parsed := decomposeShellCommand(command)
-	if len(parsed.Issues) > 0 {
-		return actionCommandObfuscated
-	}
-
-	if len(parsed.Stages) == 0 {
+	actions := classifyExecCommandActions(command)
+	if len(actions) == 0 {
 		return actionCommandExecLocal
 	}
 
 	actionType := actionUnknown
-	for _, stage := range parsed.Stages {
-		stageAction := classifyShellStage(stage)
+	for _, stageAction := range actions {
 		if commandActionRank(stageAction) > commandActionRank(actionType) {
 			actionType = stageAction
 		}
 	}
 	return actionType
+}
+
+func classifyExecCommandActions(command string) []string {
+	parsed := decomposeShellCommand(command)
+	if len(parsed.Issues) > 0 {
+		return []string{actionCommandObfuscated}
+	}
+
+	if len(parsed.Stages) == 0 {
+		return []string{actionCommandExecLocal}
+	}
+
+	stageActions := make([]string, 0, len(parsed.Stages)+1)
+	for _, stage := range parsed.Stages {
+		stageActions = append(stageActions, classifyShellStage(stage))
+	}
+	if compositionAction := detectCompositionAction(parsed.Stages, stageActions); compositionAction != "" {
+		stageActions = append(stageActions, compositionAction)
+	}
+
+	return stageActions
 }
 
 func classifyShellStage(stage shellStage) string {
@@ -81,6 +99,9 @@ func classifyShellStage(stage shellStage) string {
 		}
 		return actionCommandRead
 	case "grep", "rg", "cat", "ls", "pwd", "wc", "head", "tail", "stat":
+		if stageReadsSensitivePath(name, args) {
+			return actionSecretRead
+		}
 		if hasWriteRedirect(stage.Redirects) {
 			return actionCommandWrite
 		}
@@ -123,7 +144,7 @@ const actionCommandDangerousDelete = "command.dangerous_delete"
 
 func commandActionRank(actionType string) int {
 	switch actionType {
-	case actionCommandObfuscated, actionCommandDangerousDelete, actionGitHistoryRewrite:
+	case actionCommandExecRemote, actionCommandObfuscated, actionCommandDangerousDelete, actionGitHistoryRewrite, actionSecretExfiltrate:
 		return 100
 	case actionGitRemoteWrite, actionNetworkWrite:
 		return 90
@@ -139,11 +160,81 @@ func commandActionRank(actionType string) int {
 		return 60
 	case actionNetworkRead:
 		return 50
+	case actionSecretRead:
+		return 45
 	case actionGitRead, actionCommandRead, actionPackageBuild, actionPackageTest:
 		return 40
 	default:
 		return 10
 	}
+}
+
+func detectCompositionAction(stages []shellStage, actions []string) string {
+	for i := 0; i < len(stages)-1; i++ {
+		if stages[i].Operator != "|" {
+			continue
+		}
+		if actions[i] == actionNetworkRead && isExecutionSink(stages[i+1]) {
+			return actionCommandExecRemote
+		}
+		if actions[i] == actionSecretRead && actions[i+1] == actionNetworkWrite {
+			return actionSecretExfiltrate
+		}
+		if isDecodeStage(stages[i]) {
+			return actionCommandObfuscated
+		}
+	}
+	return ""
+}
+
+func isExecutionSink(stage shellStage) bool {
+	if len(stage.Tokens) == 0 {
+		return false
+	}
+	switch strings.ToLower(stage.Tokens[0]) {
+	case "bash", "sh", "zsh", "fish", "python", "python3", "py", "perl", "ruby", "node", "deno", "php":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDecodeStage(stage shellStage) bool {
+	if len(stage.Tokens) == 0 {
+		return false
+	}
+	name := strings.ToLower(stage.Tokens[0])
+	switch name {
+	case "base64", "xxd", "openssl", "certutil":
+		return hasAnyArg(stage.Tokens[1:], "-d", "--decode", "-decode", "enc") || hasShortFlag(stage.Tokens[1:], "d")
+	default:
+		return false
+	}
+}
+
+func stageReadsSensitivePath(command string, args []string) bool {
+	switch command {
+	case "cat", "head", "tail", "stat", "wc":
+		for _, arg := range args {
+			if isShellFileArg(arg) && isSensitivePath(normalizeRequestPath(arg, "")) {
+				return true
+			}
+		}
+	case "grep", "rg":
+		for _, arg := range args[1:] {
+			if isShellFileArg(arg) && isSensitivePath(normalizeRequestPath(arg, "")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isShellFileArg(arg string) bool {
+	if arg == "" || strings.HasPrefix(arg, "-") {
+		return false
+	}
+	return !strings.Contains(arg, "://")
 }
 
 func classifyGitCommand(args []string) string {
