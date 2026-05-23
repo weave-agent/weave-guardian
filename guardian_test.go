@@ -943,6 +943,116 @@ func TestSnapshotIncludesResolvedProfiles(t *testing.T) {
 	assert.NotEmpty(t, snapshot.Profiles["team"].Rules)
 }
 
+func TestDecisionHistoryRecordsRecentDecisionsWithLimit(t *testing.T) {
+	g := New(Config{Profile: "auto"})
+	projectDir := t.TempDir()
+
+	for i := range defaultDecisionLimit + 5 {
+		decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+			ID:          "req-history-" + string(rune('a'+i%26)),
+			ToolName:    "shell",
+			Action:      sdk.GuardianActionExec,
+			Command:     "go test ./...",
+			WorkingDir:  projectDir,
+			Description: "history fixture",
+		})
+		require.NoError(t, err)
+		require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	}
+
+	history := g.RecentDecisions()
+	require.Len(t, history, defaultDecisionLimit)
+
+	first := history[0]
+	assert.Equal(t, actionPackageTest, first.ActionType)
+	assert.Equal(t, sdk.GuardianDecisionAllow, first.Verdict)
+	assert.Equal(t, "auto:"+actionPackageTest, first.RuleID)
+	assert.NotEmpty(t, first.Reason)
+	assert.NotEmpty(t, first.Timestamp)
+	assert.Equal(t, "go test ./...", first.Evidence["command"])
+	assert.Equal(t, sdk.GuardianActionExec, first.Evidence["action"])
+	assert.Equal(t, "shell", first.Evidence["tool_name"])
+}
+
+func TestSnapshotRequestPublishesSnapshotPayload(t *testing.T) {
+	g := New(Config{Profile: "auto"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianSnapshotRequestTopic, nil))
+
+	var snapshot sdk.GuardianSnapshot
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			payload, ok := ev.Payload.(sdk.GuardianSnapshot)
+			if ev.Topic == sdk.GuardianSnapshotTopic && ok {
+				snapshot = payload
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+
+	assert.Equal(t, "auto", snapshot.CurrentProfile)
+	assert.Contains(t, snapshot.Profiles, "ask")
+	assert.Contains(t, snapshot.Profiles, "auto")
+	assert.Contains(t, snapshot.Profiles, "yolo")
+}
+
+func TestSnapshotIncludesSessionGrants(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeSession,
+			Reason: "session approved",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-grant-snapshot",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Grants, 1)
+	assert.Equal(t, sdk.GuardianGrantScopeSession, snapshot.Grants[0].Scope)
+	assert.Equal(t, "req-grant-snapshot", snapshot.Grants[0].Request.ID)
+	assert.NotEmpty(t, snapshot.Grants[0].CreatedAt)
+}
+
+func TestClearGrantsEventClearsMatchingGrants(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	g.grants = []sdk.GuardianGrant{
+		{ID: "grant-session", Scope: sdk.GuardianGrantScopeSession},
+		{ID: "grant-profile", Scope: sdk.GuardianGrantScopeProfile},
+	}
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianClearGrantsTopic, sdk.GuardianClearGrantsRequest{
+		Scope: string(sdk.GuardianGrantScopeSession),
+	}))
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Grants, 1)
+	assert.Equal(t, "grant-profile", snapshot.Grants[0].ID)
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianClearGrantsTopic, nil))
+	snapshot, err = g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
+}
+
 func TestApprovalAllowResolutionAllowsAskDecision(t *testing.T) {
 	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
 	bus := newStubBus()

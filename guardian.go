@@ -14,6 +14,7 @@ const (
 
 	defaultProfile         = "ask"
 	defaultApprovalTimeout = 2 * time.Minute
+	defaultDecisionLimit   = 100
 
 	actionTypeMetadataKey = "action_type"
 	profileMetadataKey    = "profile"
@@ -56,7 +57,21 @@ type Guardian struct {
 	mu      sync.Mutex
 	pending map[string]*pendingApproval
 	grants  []sdk.GuardianGrant
+	history []DecisionRecord
 	nextID  uint64
+}
+
+// DecisionRecord is the bounded audit trail Guardian keeps for recent
+// decisions.
+type DecisionRecord struct {
+	DecisionID string
+	RequestID  string
+	ActionType string
+	Verdict    sdk.GuardianDecisionAction
+	Reason     string
+	Evidence   map[string]any
+	RuleID     string
+	Timestamp  string
 }
 
 func init() {
@@ -101,6 +116,18 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 		g.resolve(payload.DecisionID, payload.Resolution, false)
 		return nil
 	})
+	bus.On(sdk.GuardianSnapshotRequestTopic, func(sdk.Event) error {
+		snapshot, err := g.Snapshot(context.Background())
+		if err != nil {
+			return err
+		}
+		bus.Publish(sdk.NewEvent(sdk.GuardianSnapshotTopic, snapshot))
+		return nil
+	})
+	bus.On(sdk.GuardianClearGrantsTopic, func(ev sdk.Event) error {
+		g.clearGrants(ev.Payload)
+		return nil
+	})
 	bus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
 
 	return nil
@@ -111,7 +138,7 @@ func (g *Guardian) Close() error { return nil }
 func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
 	decision := g.policyDecision(req)
 	if decision.Action != sdk.GuardianDecisionAsk {
-		g.publishDecision(decision)
+		g.recordAndPublishDecision(req, decision)
 		return decision, nil
 	}
 
@@ -120,14 +147,14 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 		decision.Reason = fmt.Sprintf("allowed by %s grant", grant.Scope)
 		decision.MatchedGrantID = grant.ID
 		decision.Approval = nil
-		g.publishDecision(decision)
+		g.recordAndPublishDecision(req, decision)
 		return decision, nil
 	}
 
 	if g.headless {
 		decision.Action = sdk.GuardianDecisionBlock
 		decision.Reason = "action requires approval in headless mode"
-		g.publishDecision(decision)
+		g.recordAndPublishDecision(req, decision)
 		return decision, nil
 	}
 
@@ -138,6 +165,7 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 	approval := g.newApproval(req, decision)
 	decision.Approval = &approval
 	if g.bus == nil {
+		g.recordDecision(req, decision)
 		return decision, nil
 	}
 
@@ -155,7 +183,7 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 		decision.Action = sdk.GuardianDecisionBlock
 		decision.Reason = "approval timed out"
 		decision.Approval = nil
-		g.publishDecision(decision)
+		g.recordAndPublishDecision(req, decision)
 		return decision, nil
 	}
 
@@ -168,7 +196,7 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 		decision.Reason = resolutionReason(resolution, "denied")
 	}
 	decision.Approval = nil
-	g.publishDecision(decision)
+	g.recordAndPublishDecision(req, decision)
 	return decision, nil
 }
 
@@ -213,6 +241,13 @@ func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 		Grants:         grants,
 		Pending:        pending,
 	}, nil
+}
+
+func (g *Guardian) RecentDecisions() []DecisionRecord {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return append([]DecisionRecord(nil), g.history...)
 }
 
 type pendingApproval struct {
@@ -408,10 +443,66 @@ func approvalTimeout(raw string) time.Duration {
 	return timeout
 }
 
-func (g *Guardian) publishDecision(decision sdk.GuardianDecision) {
+func (g *Guardian) recordAndPublishDecision(req sdk.GuardianRequest, decision sdk.GuardianDecision) {
+	g.recordDecision(req, decision)
 	if g.bus != nil {
 		g.bus.Publish(sdk.NewEvent(sdk.GuardianDecisionTopic, decision))
 	}
+}
+
+func (g *Guardian) recordDecision(req sdk.GuardianRequest, decision sdk.GuardianDecision) {
+	actionType, _ := decision.Metadata[actionTypeMetadataKey].(string)
+	record := DecisionRecord{
+		DecisionID: decision.ID,
+		RequestID:  decision.RequestID,
+		ActionType: actionType,
+		Verdict:    decision.Action,
+		Reason:     decision.Reason,
+		Evidence:   decisionEvidence(req),
+		RuleID:     decisionRuleID(decision.Profile, actionType),
+		Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.history = append(g.history, record)
+	if len(g.history) > defaultDecisionLimit {
+		g.history = append([]DecisionRecord(nil), g.history[len(g.history)-defaultDecisionLimit:]...)
+	}
+}
+
+func decisionEvidence(req sdk.GuardianRequest) map[string]any {
+	evidence := map[string]any{}
+	if req.ToolCallID != "" {
+		evidence["tool_call_id"] = req.ToolCallID
+	}
+	if req.ToolName != "" {
+		evidence["tool_name"] = req.ToolName
+	}
+	if req.Action != "" {
+		evidence["action"] = req.Action
+	}
+	if req.Command != "" {
+		evidence["command"] = req.Command
+	}
+	if req.Path != "" {
+		evidence["path"] = req.Path
+	}
+	if req.WorkingDir != "" {
+		evidence["working_dir"] = req.WorkingDir
+	}
+	if req.Description != "" {
+		evidence["description"] = req.Description
+	}
+	return evidence
+}
+
+func decisionRuleID(profile, actionType string) string {
+	if profile == "" || actionType == "" {
+		return ""
+	}
+	return profile + ":" + actionType
 }
 
 func (g *Guardian) newApproval(req sdk.GuardianRequest, decision sdk.GuardianDecision) sdk.GuardianApproval {
@@ -511,6 +602,43 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, resolution sdk.Guar
 	g.mu.Lock()
 	g.grants = append(g.grants, grant)
 	g.mu.Unlock()
+}
+
+func (g *Guardian) clearGrants(payload any) {
+	req, ok := payload.(sdk.GuardianClearGrantsRequest)
+	if !ok {
+		g.mu.Lock()
+		g.grants = nil
+		g.mu.Unlock()
+		return
+	}
+
+	ids := make(map[string]bool, len(req.GrantIDs))
+	for _, id := range req.GrantIDs {
+		if id != "" {
+			ids[id] = true
+		}
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if len(ids) == 0 && req.Scope == "" {
+		g.grants = nil
+		return
+	}
+
+	kept := g.grants[:0]
+	for _, grant := range g.grants {
+		if len(ids) > 0 && ids[grant.ID] {
+			continue
+		}
+		if req.Scope != "" && string(grant.Scope) == req.Scope {
+			continue
+		}
+		kept = append(kept, grant)
+	}
+	g.grants = kept
 }
 
 func resolutionReason(resolution sdk.GuardianResolution, fallback string) string {
