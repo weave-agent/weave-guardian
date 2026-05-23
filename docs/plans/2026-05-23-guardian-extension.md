@@ -55,11 +55,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 2
 
 ### Task 2: Implement profile resolution
-- [ ] define built-in profiles `ask`, `auto`, and `yolo`
-- [ ] implement custom profile extension and action override resolution
-- [ ] implement ask fallback behavior with default `block`
-- [ ] write tests for built-in profile policies and custom profile merging
-- [ ] run `go test ./...` - must pass before task 3
+- [x] define built-in profiles `ask`, `auto`, and `yolo`
+- [x] implement custom profile extension and action override resolution
+- [x] implement ask fallback behavior with default `block`
+- [x] write tests for built-in profile policies and custom profile merging
+- [x] run `go test ./...` - must pass before task 3
 
 ### Task 3: Implement file action classifier
 - [ ] classify read/write/delete operations into `file.*`, `secret.*`, and `policy.*` action types
