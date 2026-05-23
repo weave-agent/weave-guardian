@@ -50,7 +50,7 @@ func classifyRequest(req sdk.GuardianRequest) string {
 	case sdk.GuardianActionRead, sdk.GuardianActionWrite, sdk.GuardianActionDelete:
 		return classifyFileAction(req)
 	case sdk.GuardianActionExec:
-		return classifyExecCommand(req.Command)
+		return classifyExecCommandInWorkingDir(req.Command, req.WorkingDir)
 	case sdk.GuardianActionNetwork:
 		return classifyNetworkAction(req)
 	default:

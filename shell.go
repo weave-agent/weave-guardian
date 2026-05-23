@@ -33,7 +33,11 @@ type shellRedirect struct {
 }
 
 func classifyExecCommand(command string) string {
-	actions := classifyExecCommandActions(command)
+	return classifyExecCommandInWorkingDir(command, "")
+}
+
+func classifyExecCommandInWorkingDir(command, workingDir string) string {
+	actions := classifyExecCommandActionsInWorkingDir(command, workingDir)
 	if len(actions) == 0 {
 		return actionCommandExecLocal
 	}
@@ -47,7 +51,7 @@ func classifyExecCommand(command string) string {
 	return actionType
 }
 
-func classifyExecCommandActions(command string) []string {
+func classifyExecCommandActionsInWorkingDir(command, workingDir string) []string {
 	parsed := decomposeShellCommand(command)
 	if len(parsed.Issues) > 0 {
 		return []string{actionCommandObfuscated}
@@ -59,7 +63,7 @@ func classifyExecCommandActions(command string) []string {
 
 	stageActions := make([]string, 0, len(parsed.Stages)+1)
 	for _, stage := range parsed.Stages {
-		stageActions = append(stageActions, classifyShellStage(stage))
+		stageActions = append(stageActions, classifyShellStage(stage, workingDir))
 	}
 	if compositionAction := detectCompositionAction(parsed.Stages, stageActions); compositionAction != "" {
 		stageActions = append(stageActions, compositionAction)
@@ -68,17 +72,17 @@ func classifyExecCommandActions(command string) []string {
 	return stageActions
 }
 
-func classifyShellStage(stage shellStage) string {
-	actionType := classifyShellStageBase(stage)
-	if redirectAction, ok := classifyRedirectWrites(stage.Redirects); ok && commandActionRank(redirectAction) > commandActionRank(actionType) {
+func classifyShellStage(stage shellStage, workingDir string) string {
+	actionType := classifyShellStageBase(stage, workingDir)
+	if redirectAction, ok := classifyRedirectWrites(stage.Redirects, workingDir); ok && commandActionRank(redirectAction) > commandActionRank(actionType) {
 		return redirectAction
 	}
 	return actionType
 }
 
-func classifyShellStageBase(stage shellStage) string { //nolint:gocyclo // Command family classification is intentionally centralized.
+func classifyShellStageBase(stage shellStage, workingDir string) string { //nolint:gocyclo // Command family classification is intentionally centralized.
 	if len(stage.Tokens) == 0 {
-		if actionType, ok := classifyRedirectWrites(stage.Redirects); ok {
+		if actionType, ok := classifyRedirectWrites(stage.Redirects, workingDir); ok {
 			return actionType
 		}
 		return actionCommandRead
@@ -95,18 +99,18 @@ func classifyShellStageBase(stage shellStage) string { //nolint:gocyclo // Comma
 		if isDangerousDelete(args) {
 			return actionCommandDangerousDelete
 		}
-		if actionType, ok := classifyShellPathAction(shellPathArgs(args), actionFileDelete); ok {
+		if actionType, ok := classifyShellPathAction(shellPathArgs(args), actionFileDelete, workingDir); ok {
 			return actionType
 		}
 		return actionFileDelete
 	case "mv", "cp", "mkdir", "touch", "tee":
-		if actionType, ok := classifyShellPathAction(shellWritePathArgs(name, args), actionCommandWrite); ok {
+		if actionType, ok := classifyShellPathAction(shellWritePathArgs(name, args), actionCommandWrite, workingDir); ok {
 			return actionType
 		}
 		return actionCommandWrite
 	case "sed":
 		if hasShortFlag(args, "i") || hasLongFlag(args, "in-place") {
-			if actionType, ok := classifyShellPathAction(shellPathArgs(args), actionCommandWrite); ok {
+			if actionType, ok := classifyShellPathAction(shellPathArgs(args), actionCommandWrite, workingDir); ok {
 				return actionType
 			}
 			return actionCommandWrite
@@ -118,15 +122,15 @@ func classifyShellStageBase(stage shellStage) string { //nolint:gocyclo // Comma
 		}
 		return actionCommandRead
 	case "grep", "rg", "cat", "ls", "pwd", "wc", "head", "tail", "stat":
-		if stageReadsSensitivePath(name, args) {
+		if stageReadsSensitivePath(name, args, workingDir) {
 			return actionSecretRead
 		}
-		if actionType, ok := classifyRedirectWrites(stage.Redirects); ok {
+		if actionType, ok := classifyRedirectWrites(stage.Redirects, workingDir); ok {
 			return actionType
 		}
 		return actionCommandRead
 	case "curl", "wget":
-		return classifyNetworkCommand(name, args)
+		return classifyNetworkCommand(name, args, workingDir)
 	case "http", "https":
 		return classifyHTTPieCommand(args)
 	case "npm", "pnpm", "yarn", "bun":
@@ -152,7 +156,7 @@ func classifyShellStageBase(stage shellStage) string { //nolint:gocyclo // Comma
 	case "post", "put", "patch", "delete":
 		return actionNetworkWrite
 	default:
-		if actionType, ok := classifyRedirectWrites(stage.Redirects); ok {
+		if actionType, ok := classifyRedirectWrites(stage.Redirects, workingDir); ok {
 			return actionType
 		}
 		return actionCommandExecLocal
@@ -190,13 +194,16 @@ func commandActionRank(actionType string) int {
 
 func detectCompositionAction(stages []shellStage, actions []string) string {
 	secretTainted := false
+	networkTainted := false
 	for i := range len(stages) - 1 {
 		if stages[i].Operator != "|" {
 			secretTainted = false
+			networkTainted = false
 			continue
 		}
 		secretTainted = secretTainted || actions[i] == actionSecretRead
-		if actions[i] == actionNetworkRead && isExecutionSink(stages[i+1]) {
+		networkTainted = networkTainted || actions[i] == actionNetworkRead
+		if networkTainted && isExecutionSink(stages[i+1]) {
 			return actionCommandExecRemote
 		}
 		if secretTainted && actions[i+1] == actionNetworkWrite {
@@ -234,17 +241,17 @@ func isDecodeStage(stage shellStage) bool {
 	}
 }
 
-func stageReadsSensitivePath(command string, args []string) bool {
+func stageReadsSensitivePath(command string, args []string, workingDir string) bool {
 	switch command {
 	case "cat", "head", "tail", "stat", "wc":
 		for _, arg := range args {
-			if isShellFileArg(arg) && isSensitivePath(normalizeRequestPath(arg, "")) {
+			if isShellFileArg(arg) && isSensitiveShellPath(arg, workingDir) {
 				return true
 			}
 		}
 	case "grep", "rg":
 		for _, arg := range args[1:] {
-			if isShellFileArg(arg) && isSensitivePath(normalizeRequestPath(arg, "")) {
+			if isShellFileArg(arg) && isSensitiveShellPath(arg, workingDir) {
 				return true
 			}
 		}
@@ -337,12 +344,12 @@ func hasCheckoutPathspec(args []string) bool {
 	return false
 }
 
-func classifyNetworkCommand(name string, args []string) string {
-	requestAction := classifyNetworkRequestAction(name, args)
+func classifyNetworkCommand(name string, args []string, workingDir string) string {
+	requestAction := classifyNetworkRequestAction(name, args, workingDir)
 	if requestAction == actionSecretExfiltrate {
 		return requestAction
 	}
-	if outputAction, ok := classifyNetworkOutputWrite(name, args); ok {
+	if outputAction, ok := classifyNetworkOutputWrite(name, args, workingDir); ok {
 		if commandActionRank(outputAction) > commandActionRank(requestAction) {
 			return outputAction
 		}
@@ -351,11 +358,14 @@ func classifyNetworkCommand(name string, args []string) string {
 	return requestAction
 }
 
-func classifyNetworkRequestAction(name string, args []string) string { //nolint:gocyclo // HTTP clients expose several equivalent write indicators.
-	if networkUploadReferencesSensitivePath(name, args) {
+func classifyNetworkRequestAction(name string, args []string, workingDir string) string { //nolint:gocyclo // HTTP clients expose several equivalent write indicators.
+	if networkUploadReferencesSensitivePath(name, args, workingDir) {
 		return actionSecretExfiltrate
 	}
 	if name == "wget" && (hasLongFlag(args, "post-data") || hasLongFlag(args, "post-file") || hasLongFlag(args, "body-data") || hasLongFlag(args, "body-file")) {
+		return actionNetworkWrite
+	}
+	if name == "curl" && hasCurlUploadFile(args) {
 		return actionNetworkWrite
 	}
 	for i, arg := range args {
@@ -624,12 +634,12 @@ func isBuildScript(script string) bool {
 	}
 }
 
-func classifyRedirectWrites(redirects []shellRedirect) (string, bool) {
+func classifyRedirectWrites(redirects []shellRedirect, workingDir string) (string, bool) {
 	for _, redirect := range redirects {
 		if !strings.Contains(redirect.Operator, ">") {
 			continue
 		}
-		if actionType := classifyShellWritePath(redirect.Target, actionCommandWrite); actionType != actionCommandWrite {
+		if actionType := classifyShellWritePath(redirect.Target, actionCommandWrite, workingDir); actionType != actionCommandWrite {
 			return actionType, true
 		}
 		return actionCommandWrite, true
@@ -637,26 +647,26 @@ func classifyRedirectWrites(redirects []shellRedirect) (string, bool) {
 	return "", false
 }
 
-func classifyShellPathAction(args []string, fallback string) (string, bool) {
+func classifyShellPathAction(args []string, fallback, workingDir string) (string, bool) {
 	found := false
 	for _, arg := range args {
 		if !isShellFileArg(arg) {
 			continue
 		}
 		found = true
-		if actionType := classifyShellWritePath(arg, fallback); actionType != fallback {
+		if actionType := classifyShellWritePath(arg, fallback, workingDir); actionType != fallback {
 			return actionType, true
 		}
 	}
 	return fallback, found
 }
 
-func classifyShellWritePath(arg, fallback string) string {
-	workingDir := ""
-	if !strings.HasPrefix(arg, "/") {
-		workingDir = "/"
+func classifyShellWritePath(arg, fallback, workingDir string) string {
+	baseDir := workingDir
+	if baseDir == "" && !strings.HasPrefix(arg, "/") {
+		baseDir = "/"
 	}
-	path := normalizeRequestPath(arg, workingDir)
+	path := normalizeRequestPath(arg, baseDir)
 	if isPolicyPath(path) {
 		return actionPolicyWrite
 	}
@@ -695,7 +705,7 @@ func shellWritePathArgs(command string, args []string) []string {
 	}
 }
 
-func classifyNetworkOutputWrite(name string, args []string) (string, bool) {
+func classifyNetworkOutputWrite(name string, args []string, workingDir string) (string, bool) {
 	for i := range args {
 		arg := args[i]
 		lower := strings.ToLower(arg)
@@ -706,7 +716,7 @@ func classifyNetworkOutputWrite(name string, args []string) (string, bool) {
 			if output == "" {
 				return actionCommandWrite, true
 			}
-			return classifyShellWritePath(output, actionCommandWrite), true
+			return classifyShellWritePath(output, actionCommandWrite, workingDir), true
 		}
 	}
 	return "", false
@@ -778,7 +788,9 @@ func isDangerousDelete(args []string) bool {
 			continue
 		}
 		switch clean {
-		case "/", "*", "/*", "./*", "./**", "~", "$HOME", "${HOME}", "$PWD", "${PWD}", ".":
+		case "/", "*", "/*", "./*", "./**", "~", "~/", "~/*", "~/**",
+			"$HOME", "${HOME}", "$HOME/*", "${HOME}/*", "$HOME/**", "${HOME}/**",
+			"$PWD", "${PWD}", "$PWD/*", "${PWD}/*", "$PWD/**", "${PWD}/**", ".":
 			return recursive || clean == "/" || clean == "/*"
 		}
 	}
@@ -824,21 +836,55 @@ func isNetworkBodyFlag(arg string) bool {
 		strings.HasPrefix(arg, "--data-binary=") || strings.HasPrefix(arg, "--form=")
 }
 
-func networkUploadReferencesSensitivePath(name string, args []string) bool {
+func hasCurlUploadFile(args []string) bool {
 	for i := range args {
-		arg := args[i]
-		lower := strings.ToLower(arg)
-		if sensitiveNetworkUploadValue(networkFlagValue(lower, arg, args, i)) {
+		lower := strings.ToLower(args[i])
+		if lower == "-t" || lower == "--upload-file" {
 			return true
 		}
-		if name == "wget" && strings.HasPrefix(lower, "--post-file=") && isSensitiveShellPath(arg[len("--post-file="):]) {
-			return true
-		}
-		if name == "wget" && lower == "--post-file" && i+1 < len(args) && isSensitiveShellPath(args[i+1]) {
+		if strings.HasPrefix(lower, "--upload-file=") || (strings.HasPrefix(lower, "-t") && len(args[i]) > 2) {
 			return true
 		}
 	}
 	return false
+}
+
+func networkUploadReferencesSensitivePath(name string, args []string, workingDir string) bool {
+	for i := range args {
+		arg := args[i]
+		lower := strings.ToLower(arg)
+		if sensitiveNetworkUploadValue(networkFlagValue(lower, arg, args, i), workingDir) {
+			return true
+		}
+		if name == "curl" {
+			if uploadFile, ok := curlUploadFileValue(lower, arg, args, i); ok && isSensitiveShellPath(uploadFile, workingDir) {
+				return true
+			}
+		}
+		if name == "wget" && strings.HasPrefix(lower, "--post-file=") && isSensitiveShellPath(arg[len("--post-file="):], workingDir) {
+			return true
+		}
+		if name == "wget" && lower == "--post-file" && i+1 < len(args) && isSensitiveShellPath(args[i+1], workingDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func curlUploadFileValue(lower, original string, args []string, index int) (string, bool) {
+	switch {
+	case lower == "-t" || lower == "--upload-file":
+		if index+1 < len(args) {
+			return args[index+1], true
+		}
+		return "", true
+	case strings.HasPrefix(lower, "--upload-file="):
+		return original[len("--upload-file="):], true
+	case strings.HasPrefix(lower, "-t") && len(original) > 2:
+		return original[2:], true
+	default:
+		return "", false
+	}
 }
 
 func networkFlagValue(lower, original string, args []string, index int) string {
@@ -862,25 +908,29 @@ func networkFlagValue(lower, original string, args []string, index int) string {
 	return ""
 }
 
-func sensitiveNetworkUploadValue(value string) bool {
+func sensitiveNetworkUploadValue(value, workingDir string) bool {
 	if value == "" {
 		return false
 	}
 	if strings.HasPrefix(value, "@") {
-		return isSensitiveShellPath(value[1:])
+		return isSensitiveShellPath(value[1:], workingDir)
 	}
 	if _, path, ok := strings.Cut(value, "=@"); ok {
-		return isSensitiveShellPath(path)
+		return isSensitiveShellPath(path, workingDir)
 	}
 	return false
 }
 
-func isSensitiveShellPath(raw string) bool {
+func isSensitiveShellPath(raw, workingDir string) bool {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || strings.HasPrefix(raw, "-") {
 		return false
 	}
-	path := normalizeRequestPath(raw, "/")
+	baseDir := workingDir
+	if baseDir == "" && !strings.HasPrefix(raw, "/") {
+		baseDir = "/"
+	}
+	path := normalizeRequestPath(raw, baseDir)
 	return isSensitivePath(path)
 }
 

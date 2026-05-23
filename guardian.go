@@ -147,9 +147,13 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 		return decision, nil
 	}
 
-	if g.headless {
+	if g.headless || g.bus == nil {
 		decision.Action = sdk.GuardianDecisionBlock
-		decision.Reason = "action requires approval in headless mode"
+		if g.headless {
+			decision.Reason = "action requires approval in headless mode"
+		} else {
+			decision.Reason = "approval unavailable"
+		}
 		g.recordAndPublishDecision(req, decision)
 		return decision, nil
 	}
@@ -160,15 +164,6 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 	}
 	approval := g.newApproval(req, decision)
 	decision.Approval = &approval
-	if g.bus == nil {
-		if g.approvalTimeout != defaultApprovalTimeout {
-			decision.Action = sdk.GuardianDecisionBlock
-			decision.Reason = "approval unavailable"
-			decision.Approval = nil
-		}
-		g.recordDecision(req, decision)
-		return decision, nil
-	}
 
 	pending := &pendingApproval{approval: approval, result: make(chan sdk.GuardianResolution, 1)}
 	g.mu.Lock()
@@ -728,7 +723,7 @@ func requestActionTypes(req sdk.GuardianRequest) []string {
 	}
 
 	if req.Action == sdk.GuardianActionExec {
-		return classifyExecCommandActions(req.Command)
+		return classifyExecCommandActionsInWorkingDir(req.Command, req.WorkingDir)
 	}
 
 	return []string{classifyRequest(req)}
