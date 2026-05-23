@@ -256,17 +256,17 @@ func requestActionType(req sdk.GuardianRequest) string {
 
 	switch req.Action {
 	case sdk.GuardianActionRead:
-		return "file.read"
+		return classifyRequest(req)
 	case sdk.GuardianActionWrite:
-		return "file.write"
+		return classifyRequest(req)
 	case sdk.GuardianActionDelete:
-		return "file.delete"
+		return classifyRequest(req)
 	case sdk.GuardianActionExec:
-		return "command.exec_local"
+		return classifyRequest(req)
 	case sdk.GuardianActionNetwork:
-		return "network.read"
+		return classifyRequest(req)
 	default:
-		return "unknown"
+		return classifyRequest(req)
 	}
 }
 

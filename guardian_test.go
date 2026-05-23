@@ -2,6 +2,8 @@ package guardian
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -307,6 +309,149 @@ func TestSDKActionFallbacksMapToDetailedActionTypes(t *testing.T) {
 
 	assert.Equal(t, "file.write", decision.Metadata[actionTypeMetadataKey])
 	assert.Equal(t, sdk.GuardianDecisionAsk, decision.Action)
+}
+
+func TestFileActionClassifier(t *testing.T) {
+	projectDir := t.TempDir()
+	tests := []struct {
+		name     string
+		action   sdk.GuardianAction
+		path     string
+		wantType string
+	}{
+		{
+			name:     "project file read",
+			action:   sdk.GuardianActionRead,
+			path:     "README.md",
+			wantType: actionFileRead,
+		},
+		{
+			name:     "project file write",
+			action:   sdk.GuardianActionWrite,
+			path:     "src/main.go",
+			wantType: actionFileWrite,
+		},
+		{
+			name:     "project file delete",
+			action:   sdk.GuardianActionDelete,
+			path:     "old.txt",
+			wantType: actionFileDelete,
+		},
+		{
+			name:     "env file read is secret",
+			action:   sdk.GuardianActionRead,
+			path:     ".env.local",
+			wantType: actionSecretRead,
+		},
+		{
+			name:     "ssh key read is secret",
+			action:   sdk.GuardianActionRead,
+			path:     filepath.Join(projectDir, ".ssh", "id_rsa"),
+			wantType: actionSecretRead,
+		},
+		{
+			name:     "guardian settings read is policy",
+			action:   sdk.GuardianActionRead,
+			path:     filepath.Join(projectDir, ".weave", "guardian", "settings.json"),
+			wantType: actionPolicyRead,
+		},
+		{
+			name:     "sandbox settings write is policy tampering",
+			action:   sdk.GuardianActionWrite,
+			path:     filepath.Join(projectDir, ".weave", "sandbox", "config.json"),
+			wantType: actionPolicyWrite,
+		},
+		{
+			name:     "extension policy delete is policy tampering",
+			action:   sdk.GuardianActionDelete,
+			path:     filepath.Join(projectDir, ".weave", "extensions", "tool", "policy.yaml"),
+			wantType: actionPolicyWrite,
+		},
+		{
+			name:     "git internals write is protected",
+			action:   sdk.GuardianActionWrite,
+			path:     filepath.Join(projectDir, ".git", "config"),
+			wantType: actionFileProtected,
+		},
+		{
+			name:     "system config write is protected",
+			action:   sdk.GuardianActionWrite,
+			path:     "/etc/hosts",
+			wantType: actionFileProtected,
+		},
+		{
+			name:     "secret write falls back to normal write",
+			action:   sdk.GuardianActionWrite,
+			path:     ".env",
+			wantType: actionFileWrite,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := sdk.GuardianRequest{
+				ID:         "req",
+				Action:     tt.action,
+				Path:       tt.path,
+				WorkingDir: projectDir,
+			}
+
+			assert.Equal(t, tt.wantType, classifyRequest(req))
+		})
+	}
+}
+
+func TestFileActionClassifierResolvesSymlinks(t *testing.T) {
+	projectDir := t.TempDir()
+	realDir := filepath.Join(projectDir, "real")
+	require.NoError(t, os.Mkdir(realDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, ".env"), []byte("TOKEN=value"), 0o600))
+
+	secretLink := filepath.Join(projectDir, "safe-name")
+	require.NoError(t, os.Symlink(filepath.Join(realDir, ".env"), secretLink))
+
+	req := sdk.GuardianRequest{
+		ID:         "req",
+		Action:     sdk.GuardianActionRead,
+		Path:       secretLink,
+		WorkingDir: projectDir,
+	}
+
+	assert.Equal(t, actionSecretRead, classifyRequest(req))
+}
+
+func TestFileActionClassifierResolvesExistingSymlinkParents(t *testing.T) {
+	projectDir := t.TempDir()
+	realWeave := filepath.Join(projectDir, "real-weave")
+	require.NoError(t, os.MkdirAll(filepath.Join(realWeave, "extensions", "tool"), 0o755))
+
+	link := filepath.Join(projectDir, "linked-weave")
+	require.NoError(t, os.Symlink(realWeave, link))
+
+	req := sdk.GuardianRequest{
+		ID:         "req",
+		Action:     sdk.GuardianActionWrite,
+		Path:       filepath.Join(link, "extensions", "tool", "policy.json"),
+		WorkingDir: projectDir,
+	}
+
+	assert.Equal(t, actionPolicyWrite, classifyRequest(req))
+}
+
+func TestDecideUsesFileClassifierWhenMetadataIsAbsent(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	projectDir := t.TempDir()
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-policy",
+		Action:     sdk.GuardianActionWrite,
+		Path:       filepath.Join(projectDir, ".weave", "guardian", "settings.json"),
+		WorkingDir: projectDir,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, actionPolicyWrite, decision.Metadata[actionTypeMetadataKey])
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
 }
 
 func TestSnapshotIncludesResolvedProfiles(t *testing.T) {

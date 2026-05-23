@@ -62,11 +62,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 3
 
 ### Task 3: Implement file action classifier
-- [ ] classify read/write/delete operations into `file.*`, `secret.*`, and `policy.*` action types
-- [ ] implement protected path and sensitive path matching with symlink-aware resolution
-- [ ] implement guardian self-protection for guardian/sandbox settings and extension policy files
-- [ ] write tests for normal project files, protected files, secrets, policy files, and symlink edge cases
-- [ ] run `go test ./...` - must pass before task 4
+- [x] classify read/write/delete operations into `file.*`, `secret.*`, and `policy.*` action types
+- [x] implement protected path and sensitive path matching with symlink-aware resolution
+- [x] implement guardian self-protection for guardian/sandbox settings and extension policy files
+- [x] write tests for normal project files, protected files, secrets, policy files, and symlink edge cases
+- [x] run `go test ./...` - must pass before task 4
 
 ### Task 4: Implement shell parser and command decomposition
 - [ ] tokenize bash commands with quote-aware parsing
