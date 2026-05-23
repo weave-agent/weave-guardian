@@ -83,11 +83,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 6
 
 ### Task 6: Implement developer workflow command classifiers
-- [ ] classify package and build commands for `npm`, `pnpm`, `yarn`, `bun`, `go`, `cargo`, `python`, `uv`, `pip`, `make`, and `just`
-- [ ] classify global package installs and unknown package/script execution conservatively
-- [ ] classify process/service commands such as `kill`, `pkill`, and `systemctl`
-- [ ] write tests for common test/build/lint commands, installs, global installs, and service changes
-- [ ] run `go test ./...` - must pass before task 7
+- [x] classify package and build commands for `npm`, `pnpm`, `yarn`, `bun`, `go`, `cargo`, `python`, `uv`, `pip`, `make`, and `just`
+- [x] classify global package installs and unknown package/script execution conservatively
+- [x] classify process/service commands such as `kill`, `pkill`, and `systemctl`
+- [x] write tests for common test/build/lint commands, installs, global installs, and service changes
+- [x] run `go test ./...` - must pass before task 7
 
 ### Task 7: Implement composition detector and aggregation
 - [ ] detect `network.read | exec` as `command.exec_remote`

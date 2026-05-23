@@ -89,6 +89,24 @@ func classifyShellStage(stage shellStage) string {
 		return classifyNetworkCommand(name, args)
 	case "http", "https":
 		return classifyHTTPieCommand(args)
+	case "npm", "pnpm", "yarn", "bun":
+		return classifyJavaScriptPackageCommand(name, args)
+	case "go":
+		return classifyGoCommand(args)
+	case "cargo":
+		return classifyCargoCommand(args)
+	case "python", "python3", "py":
+		return classifyPythonCommand(args)
+	case "uv":
+		return classifyUVCommand(args)
+	case "pip", "pip3":
+		return classifyPipCommand(args)
+	case "make", "just":
+		return classifyTaskRunnerCommand(args)
+	case "kill", "pkill", "killall":
+		return actionSystemSignal
+	case "systemctl", "service", "launchctl":
+		return actionSystemService
 	case "get", "options":
 		return actionNetworkRead
 	case "post", "put", "patch", "delete":
@@ -113,11 +131,15 @@ func commandActionRank(actionType string) int {
 		return 80
 	case actionFileDelete, actionGitWrite, actionCommandWrite:
 		return 70
+	case actionPackageGlobal, actionSystemService:
+		return 68
+	case actionPackageInstall, actionPackageScript, actionSystemSignal:
+		return 65
 	case actionCommandExecLocal:
 		return 60
 	case actionNetworkRead:
 		return 50
-	case actionGitRead, actionCommandRead:
+	case actionGitRead, actionCommandRead, actionPackageBuild, actionPackageTest:
 		return 40
 	default:
 		return 10
@@ -233,6 +255,237 @@ func classifyHTTPieCommand(args []string) string {
 		}
 	}
 	return actionNetworkRead
+}
+
+func classifyJavaScriptPackageCommand(name string, args []string) string {
+	if len(args) == 0 {
+		return actionPackageScript
+	}
+
+	command, rest := firstNonFlagArg(args)
+	if command == "" {
+		return actionPackageScript
+	}
+	command = strings.ToLower(command)
+
+	if name == "yarn" && command == "global" {
+		return actionPackageGlobal
+	}
+	if hasGlobalPackageFlag(args) {
+		return actionPackageGlobal
+	}
+
+	switch command {
+	case "install", "i", "ci", "add":
+		return actionPackageInstall
+	case "test", "t", "lint", "check":
+		return actionPackageTest
+	case "build", "compile":
+		return actionPackageBuild
+	case "run", "run-script":
+		return classifyPackageScript(rest)
+	case "exec", "x", "dlx", "create", "init":
+		return actionPackageScript
+	default:
+		if isTestScript(command) {
+			return actionPackageTest
+		}
+		if isBuildScript(command) {
+			return actionPackageBuild
+		}
+		return actionPackageScript
+	}
+}
+
+func classifyGoCommand(args []string) string {
+	if len(args) == 0 {
+		return actionPackageScript
+	}
+	subcommand := strings.ToLower(args[0])
+	switch subcommand {
+	case "test", "vet":
+		return actionPackageTest
+	case "build", "generate", "fmt", "fmt ./...", "tool":
+		return actionPackageBuild
+	case "install":
+		return actionPackageGlobal
+	case "get", "mod", "work":
+		return actionPackageInstall
+	case "run":
+		return actionPackageScript
+	case "env", "version", "list", "doc":
+		return actionCommandRead
+	default:
+		return actionPackageScript
+	}
+}
+
+func classifyCargoCommand(args []string) string {
+	if len(args) == 0 {
+		return actionPackageScript
+	}
+	subcommand := strings.ToLower(args[0])
+	switch subcommand {
+	case "test", "nextest", "clippy", "check", "bench":
+		return actionPackageTest
+	case "build", "doc", "fmt":
+		return actionPackageBuild
+	case "install":
+		return actionPackageGlobal
+	case "add", "update", "fetch":
+		return actionPackageInstall
+	case "run":
+		return actionPackageScript
+	case "metadata", "version", "tree":
+		return actionCommandRead
+	default:
+		return actionPackageScript
+	}
+}
+
+func classifyPythonCommand(args []string) string {
+	module, moduleArgs, ok := pythonModule(args)
+	if !ok {
+		return actionPackageScript
+	}
+	switch module {
+	case "pip":
+		return classifyPipCommand(moduleArgs)
+	case "pytest", "unittest", "mypy", "ruff":
+		return actionPackageTest
+	case "build", "compileall":
+		return actionPackageBuild
+	default:
+		return actionPackageScript
+	}
+}
+
+func classifyUVCommand(args []string) string {
+	if len(args) == 0 {
+		return actionPackageScript
+	}
+	subcommand := strings.ToLower(args[0])
+	switch subcommand {
+	case "pip":
+		return classifyPipCommand(args[1:])
+	case "sync", "add", "remove", "lock":
+		return actionPackageInstall
+	case "run":
+		return classifyPackageScript(args[1:])
+	case "tool":
+		if len(args) > 1 && strings.EqualFold(args[1], "install") {
+			return actionPackageGlobal
+		}
+		return actionPackageScript
+	case "build":
+		return actionPackageBuild
+	default:
+		return actionPackageScript
+	}
+}
+
+func classifyPipCommand(args []string) string {
+	if len(args) == 0 {
+		return actionPackageScript
+	}
+	command, _ := firstNonFlagArg(args)
+	switch strings.ToLower(command) {
+	case "install":
+		if hasGlobalPackageFlag(args) || pipInstallTargetsGlobal(args) {
+			return actionPackageGlobal
+		}
+		return actionPackageInstall
+	case "download", "wheel":
+		return actionPackageInstall
+	case "list", "show", "freeze", "check":
+		return actionCommandRead
+	default:
+		return actionPackageScript
+	}
+}
+
+func classifyTaskRunnerCommand(args []string) string {
+	if len(args) == 0 {
+		return actionPackageScript
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return classifyPackageScript([]string{arg})
+	}
+	return actionPackageScript
+}
+
+func classifyPackageScript(args []string) string {
+	command, _ := firstNonFlagArg(args)
+	command = strings.ToLower(command)
+	if isTestScript(command) {
+		return actionPackageTest
+	}
+	if isBuildScript(command) {
+		return actionPackageBuild
+	}
+	return actionPackageScript
+}
+
+func firstNonFlagArg(args []string) (string, []string) {
+	for i, arg := range args {
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[i+1], args[i+2:]
+			}
+			return "", nil
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg, args[i+1:]
+	}
+	return "", nil
+}
+
+func hasGlobalPackageFlag(args []string) bool {
+	return hasAnyArg(args, "-g", "--global", "--location=global") || hasShortFlag(args, "g") || hasLongFlag(args, "global")
+}
+
+func pipInstallTargetsGlobal(args []string) bool {
+	return hasAnyArg(args, "--user", "--break-system-packages") || hasLongFlag(args, "user") || hasLongFlag(args, "break-system-packages")
+}
+
+func pythonModule(args []string) (string, []string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-m" {
+			if i+1 < len(args) {
+				return strings.ToLower(args[i+1]), args[i+2:], true
+			}
+			return "", nil, false
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return "", nil, false
+	}
+	return "", nil, false
+}
+
+func isTestScript(script string) bool {
+	switch script {
+	case "test", "tests", "lint", "check", "ci", "verify", "vet", "clippy", "pytest", "mypy", "ruff":
+		return true
+	default:
+		return strings.HasPrefix(script, "test:") || strings.HasPrefix(script, "lint:")
+	}
+}
+
+func isBuildScript(script string) bool {
+	switch script {
+	case "build", "compile", "dist", "bundle", "package", "release":
+		return true
+	default:
+		return strings.HasPrefix(script, "build:")
+	}
 }
 
 func findMutates(args []string) bool {

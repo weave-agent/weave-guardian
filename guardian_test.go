@@ -646,6 +646,184 @@ func TestCoreCommandClassifiers(t *testing.T) {
 	}
 }
 
+func TestDeveloperWorkflowCommandClassifiers(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  string
+		wantType string
+		want     sdk.GuardianDecisionAction
+	}{
+		{
+			name:     "npm test is package test",
+			command:  "npm test",
+			wantType: actionPackageTest,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "pnpm build script is package build",
+			command:  "pnpm run build",
+			wantType: actionPackageBuild,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "yarn install is package install",
+			command:  "yarn install --frozen-lockfile",
+			wantType: actionPackageInstall,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "bun add is package install",
+			command:  "bun add hono",
+			wantType: actionPackageInstall,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "npm global install is package global install",
+			command:  "npm install -g typescript",
+			wantType: actionPackageGlobal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "yarn global add is package global install",
+			command:  "yarn global add eslint",
+			wantType: actionPackageGlobal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "unknown npm script is package script",
+			command:  "npm run deploy",
+			wantType: actionPackageScript,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "npx execution is package script",
+			command:  "npm exec some-tool -- --flag",
+			wantType: actionPackageScript,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "go test is package test",
+			command:  "go test ./...",
+			wantType: actionPackageTest,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "go build is package build",
+			command:  "go build ./cmd/server",
+			wantType: actionPackageBuild,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "go install is package global install",
+			command:  "go install example.com/tool@latest",
+			wantType: actionPackageGlobal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "cargo clippy is package test",
+			command:  "cargo clippy --all-targets",
+			wantType: actionPackageTest,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "cargo install is package global install",
+			command:  "cargo install ripgrep",
+			wantType: actionPackageGlobal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "python pytest module is package test",
+			command:  "python -m pytest tests",
+			wantType: actionPackageTest,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "python unknown script is package script",
+			command:  "python scripts/deploy.py",
+			wantType: actionPackageScript,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "uv sync is package install",
+			command:  "uv sync",
+			wantType: actionPackageInstall,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "uv tool install is package global install",
+			command:  "uv tool install ruff",
+			wantType: actionPackageGlobal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "pip install is package install",
+			command:  "pip install -r requirements.txt",
+			wantType: actionPackageInstall,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "pip user install is package global install",
+			command:  "pip install --user tox",
+			wantType: actionPackageGlobal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "make test is package test",
+			command:  "make test",
+			wantType: actionPackageTest,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "just build is package build",
+			command:  "just build",
+			wantType: actionPackageBuild,
+			want:     sdk.GuardianDecisionAllow,
+		},
+		{
+			name:     "make deploy is package script",
+			command:  "make deploy",
+			wantType: actionPackageScript,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "kill signals processes",
+			command:  "kill -TERM 1234",
+			wantType: actionSystemSignal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "pkill signals processes",
+			command:  "pkill node",
+			wantType: actionSystemSignal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "systemctl changes services",
+			command:  "systemctl restart nginx",
+			wantType: actionSystemService,
+			want:     sdk.GuardianDecisionAsk,
+		},
+	}
+
+	g := New(Config{Profile: "ask"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := sdk.GuardianRequest{
+				ID:      "req-" + tt.name,
+				Action:  sdk.GuardianActionExec,
+				Command: tt.command,
+			}
+
+			assert.Equal(t, tt.wantType, classifyRequest(req))
+
+			decision, err := g.Decide(context.Background(), req)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantType, decision.Metadata[actionTypeMetadataKey])
+			assert.Equal(t, tt.want, decision.Action)
+		})
+	}
+}
+
 func TestSnapshotIncludesResolvedProfiles(t *testing.T) {
 	g := New(Config{
 		Profile: "team",

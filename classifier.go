@@ -27,6 +27,13 @@ const (
 	actionGitHistoryRewrite = "git.history_rewrite"
 	actionCommandRead       = "command.read"
 	actionCommandWrite      = "command.write"
+	actionPackageTest       = "package.test"
+	actionPackageBuild      = "package.build"
+	actionPackageInstall    = "package.install"
+	actionPackageGlobal     = "package.global_install"
+	actionPackageScript     = "package.script"
+	actionSystemSignal      = "system.process_signal"
+	actionSystemService     = "system.service_change"
 	actionUnknown           = "unknown"
 )
 
