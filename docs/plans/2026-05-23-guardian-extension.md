@@ -98,12 +98,12 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 8
 
 ### Task 8: Implement approval lifecycle and session grants
-- [ ] publish ID-based approval requests for ask decisions
-- [ ] handle approval resolutions for once, session, and profile scopes
-- [ ] store session grants and apply them to future matching requests
-- [ ] implement timeout and headless ask fallback behavior
-- [ ] write tests for approval allow, deny, timeout, session grant matching, and headless fallback
-- [ ] run `go test ./...` - must pass before task 9
+- [x] publish ID-based approval requests for ask decisions
+- [x] handle approval resolutions for once, session, and profile scopes
+- [x] store session grants and apply them to future matching requests
+- [x] implement timeout and headless ask fallback behavior
+- [x] write tests for approval allow, deny, timeout, session grant matching, and headless fallback
+- [x] run `go test ./...` - must pass before task 9
 
 ### Task 9: Implement decision history and snapshots
 - [ ] record recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp

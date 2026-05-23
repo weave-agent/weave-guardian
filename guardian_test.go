@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -940,6 +941,208 @@ func TestSnapshotIncludesResolvedProfiles(t *testing.T) {
 	require.Contains(t, snapshot.Profiles, "team")
 	assert.Equal(t, "team", snapshot.Profiles["team"].Name)
 	assert.NotEmpty(t, snapshot.Profiles["team"].Rules)
+}
+
+func TestApprovalAllowResolutionAllowsAskDecision(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload, ok := ev.Payload.(sdk.GuardianApprovalRequest)
+		require.True(t, ok)
+		assert.Equal(t, "req-write", payload.Approval.DecisionID)
+		assert.Equal(t, []sdk.GuardianGrantScope{
+			sdk.GuardianGrantScopeOnce,
+			sdk.GuardianGrantScopeSession,
+			sdk.GuardianGrantScopeProfile,
+		}, payload.Approval.AllowedScopes)
+
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeOnce,
+			Reason: "approved for test",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-write",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, "approved for test", decision.Reason)
+	assert.Nil(t, decision.Approval)
+	assertPublishedDecision(t, bus, "req-write", sdk.GuardianDecisionAllow)
+}
+
+func TestApprovalDenyResolutionBlocksAskDecision(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionDeny,
+			Scope:  sdk.GuardianGrantScopeOnce,
+			Reason: "denied for test",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-delete",
+		Action:     sdk.GuardianActionDelete,
+		Path:       "old.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "denied for test", decision.Reason)
+	assertPublishedDecision(t, bus, "req-delete", sdk.GuardianDecisionBlock)
+}
+
+func TestApprovalTimeoutBlocksAskDecision(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1ms"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-timeout",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "approval timed out", decision.Reason)
+	assertPublishedDecision(t, bus, "req-timeout", sdk.GuardianDecisionBlock)
+}
+
+func TestSessionGrantMatchesFutureAskDecision(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	approvalRequests := 0
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		approvalRequests++
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeSession,
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	first, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-first",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "one.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, first.Action)
+
+	second, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-second",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "two.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionAllow, second.Action)
+	assert.NotEmpty(t, second.MatchedGrantID)
+	assert.Equal(t, 1, approvalRequests)
+}
+
+func TestProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	approvalRequests := 0
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		approvalRequests++
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeProfile,
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	first, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:     "req-network-first",
+		Action: sdk.GuardianActionNetwork,
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionNetworkWrite,
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, first.Action)
+
+	second, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:     "req-network-second",
+		Action: sdk.GuardianActionNetwork,
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionNetworkWrite,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionAllow, second.Action)
+	assert.NotEmpty(t, second.MatchedGrantID)
+
+	g.cfg.Profile = "auto"
+	third, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:     "req-network-third",
+		Action: sdk.GuardianActionNetwork,
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionNetworkWrite,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionAllow, third.Action)
+	assert.Empty(t, third.MatchedGrantID)
+	assert.Equal(t, 2, approvalRequests)
+}
+
+func TestHeadlessAskDecisionFallsBackToBlock(t *testing.T) {
+	g := newGuardian(Config{Profile: "ask", ApprovalTimeout: "1s"}, true)
+	bus := newStubBus()
+	approvalRequests := 0
+	bus.On(sdk.GuardianApprovalRequestTopic, func(sdk.Event) error {
+		approvalRequests++
+		return nil
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-headless",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "action requires approval in headless mode", decision.Reason)
+	assert.Equal(t, 0, approvalRequests)
+	assertPublishedDecision(t, bus, "req-headless", sdk.GuardianDecisionBlock)
+}
+
+func assertPublishedDecision(t *testing.T, bus *stubBus, requestID string, action sdk.GuardianDecisionAction) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			decision, ok := ev.Payload.(sdk.GuardianDecision)
+			if ev.Topic == sdk.GuardianDecisionTopic && ok && decision.RequestID == requestID && decision.Action == action {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
 }
 
 func requestForActionType(actionType string) sdk.GuardianRequest {

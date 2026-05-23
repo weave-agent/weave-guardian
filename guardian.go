@@ -3,6 +3,8 @@ package guardian
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/weave-agent/weave/sdk"
 )
@@ -10,15 +12,18 @@ import (
 const (
 	extensionName = "guardian"
 
-	defaultProfile = "ask"
+	defaultProfile         = "ask"
+	defaultApprovalTimeout = 2 * time.Minute
 
 	actionTypeMetadataKey = "action_type"
+	profileMetadataKey    = "profile"
 )
 
 // Config holds guardian extension settings.
 type Config struct {
-	Profile  string                   `json:"profile" default:"ask" env:"PROFILE" description:"Active guardian policy profile"`
-	Profiles map[string]ProfileConfig `json:"profiles,omitempty" description:"Custom guardian policy profiles"`
+	Profile         string                   `json:"profile" default:"ask" env:"PROFILE" description:"Active guardian policy profile"`
+	ApprovalTimeout string                   `json:"approval_timeout,omitempty" default:"2m" description:"How long to wait for ask-mode approval before denying"`
+	Profiles        map[string]ProfileConfig `json:"profiles,omitempty" description:"Custom guardian policy profiles"`
 }
 
 // ProfileConfig defines a user profile by extending a built-in or custom
@@ -42,19 +47,30 @@ type policyRule struct {
 // Guardian owns action classification, policy decisions, approvals, grants, and
 // snapshots.
 type Guardian struct {
-	cfg      Config
-	bus      sdk.Bus
-	profiles map[string]policyProfile
+	cfg             Config
+	bus             sdk.Bus
+	profiles        map[string]policyProfile
+	headless        bool
+	approvalTimeout time.Duration
+
+	mu      sync.Mutex
+	pending map[string]*pendingApproval
+	grants  []sdk.GuardianGrant
+	nextID  uint64
 }
 
 func init() {
-	sdk.RegisterExtensionWithScope[Config](extensionName, extensionName, func(_ sdk.Config, _ sdk.PreferenceReader, cfg Config) (sdk.Extension, error) {
-		return New(cfg), nil
+	sdk.RegisterExtensionWithScope[Config](extensionName, extensionName, func(sdkCfg sdk.Config, _ sdk.PreferenceReader, cfg Config) (sdk.Extension, error) {
+		return newGuardian(cfg, sdkCfg.IsHeadless()), nil
 	})
 }
 
 // New creates a Guardian extension with normalized config defaults.
 func New(cfg Config) *Guardian {
+	return newGuardian(cfg, false)
+}
+
+func newGuardian(cfg Config, headless bool) *Guardian {
 	if cfg.Profile == "" {
 		cfg.Profile = defaultProfile
 	}
@@ -64,13 +80,27 @@ func New(cfg Config) *Guardian {
 		cfg.Profile = defaultProfile
 	}
 
-	return &Guardian{cfg: cfg, profiles: profiles}
+	return &Guardian{
+		cfg:             cfg,
+		profiles:        profiles,
+		headless:        headless,
+		approvalTimeout: approvalTimeout(cfg.ApprovalTimeout),
+		pending:         make(map[string]*pendingApproval),
+	}
 }
 
 func (g *Guardian) Name() string { return extensionName }
 
 func (g *Guardian) Subscribe(bus sdk.Bus) error {
 	g.bus = bus
+	bus.On(sdk.GuardianApprovalResolutionTopic, func(ev sdk.Event) error {
+		payload, ok := ev.Payload.(sdk.GuardianApprovalResolution)
+		if !ok {
+			return nil
+		}
+		g.resolve(payload.DecisionID, payload.Resolution, false)
+		return nil
+	})
 	bus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
 
 	return nil
@@ -78,9 +108,122 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 
 func (g *Guardian) Close() error { return nil }
 
-func (g *Guardian) Decide(_ context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.GuardianDecision, error) {
+	decision := g.policyDecision(req)
+	if decision.Action != sdk.GuardianDecisionAsk {
+		g.publishDecision(decision)
+		return decision, nil
+	}
+
+	if grant, ok := g.matchingGrant(req, decision); ok {
+		decision.Action = sdk.GuardianDecisionAllow
+		decision.Reason = fmt.Sprintf("allowed by %s grant", grant.Scope)
+		decision.MatchedGrantID = grant.ID
+		decision.Approval = nil
+		g.publishDecision(decision)
+		return decision, nil
+	}
+
+	if g.headless {
+		decision.Action = sdk.GuardianDecisionBlock
+		decision.Reason = "action requires approval in headless mode"
+		g.publishDecision(decision)
+		return decision, nil
+	}
+
+	if decision.ID == "" {
+		decision.ID = g.nextIdentifier("decision")
+		decision.RequestID = decision.ID
+	}
+	approval := g.newApproval(req, decision)
+	decision.Approval = &approval
+	if g.bus == nil {
+		return decision, nil
+	}
+
+	pending := &pendingApproval{approval: approval, result: make(chan sdk.GuardianResolution, 1)}
+	g.mu.Lock()
+	g.pending[decision.ID] = pending
+	g.mu.Unlock()
+	g.bus.Publish(sdk.NewEvent(sdk.GuardianApprovalRequestTopic, sdk.GuardianApprovalRequest{Approval: approval}))
+
+	resolution, ok := g.waitForResolution(ctx, pending)
+	g.mu.Lock()
+	delete(g.pending, decision.ID)
+	g.mu.Unlock()
+	if !ok {
+		decision.Action = sdk.GuardianDecisionBlock
+		decision.Reason = "approval timed out"
+		decision.Approval = nil
+		g.publishDecision(decision)
+		return decision, nil
+	}
+
+	if resolution.Action == sdk.GuardianResolutionAllow {
+		decision.Action = sdk.GuardianDecisionAllow
+		decision.Reason = resolutionReason(resolution, "approved")
+		g.applyGrant(approval, resolution)
+	} else {
+		decision.Action = sdk.GuardianDecisionBlock
+		decision.Reason = resolutionReason(resolution, "denied")
+	}
+	decision.Approval = nil
+	g.publishDecision(decision)
+	return decision, nil
+}
+
+func (g *Guardian) Resolve(_ context.Context, decisionID string, resolution sdk.GuardianResolution) error {
+	g.resolve(decisionID, resolution, true)
+	return nil
+}
+
+func (g *Guardian) resolve(decisionID string, resolution sdk.GuardianResolution, publish bool) {
+	g.mu.Lock()
+	pending := g.pending[decisionID]
+	g.mu.Unlock()
+	if pending == nil {
+		return
+	}
+
+	select {
+	case pending.result <- resolution:
+	default:
+	}
+	if publish && g.bus != nil {
+		g.bus.Publish(sdk.NewEvent(sdk.GuardianApprovalResolutionTopic, sdk.GuardianApprovalResolution{
+			ApprovalID: pending.approval.ID,
+			DecisionID: decisionID,
+			Resolution: resolution,
+		}))
+	}
+}
+
+func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
+	g.mu.Lock()
+	grants := append([]sdk.GuardianGrant(nil), g.grants...)
+	pending := make([]sdk.GuardianApproval, 0, len(g.pending))
+	for _, approval := range g.pending {
+		pending = append(pending, approval.approval)
+	}
+	g.mu.Unlock()
+
+	return sdk.GuardianSnapshot{
+		CurrentProfile: g.cfg.Profile,
+		Profiles:       sdkProfiles(g.profiles),
+		Grants:         grants,
+		Pending:        pending,
+	}, nil
+}
+
+type pendingApproval struct {
+	approval sdk.GuardianApproval
+	result   chan sdk.GuardianResolution
+}
+
+func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision {
 	actionTypes := requestActionTypes(req)
-	profile := g.profiles[g.cfg.Profile]
+	profileName := g.cfg.Profile
+	profile := g.profiles[profileName]
 
 	actionType := ""
 	rule := policyRule{
@@ -106,22 +249,11 @@ func (g *Guardian) Decide(_ context.Context, req sdk.GuardianRequest) (sdk.Guard
 		RequestID: req.ID,
 		Action:    rule.decision,
 		Reason:    rule.reason,
-		Profile:   profile.name,
+		Profile:   profileName,
 		Metadata: map[string]any{
 			actionTypeMetadataKey: actionType,
 		},
-	}, nil
-}
-
-func (g *Guardian) Resolve(context.Context, string, sdk.GuardianResolution) error {
-	return nil
-}
-
-func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
-	return sdk.GuardianSnapshot{
-		CurrentProfile: g.cfg.Profile,
-		Profiles:       sdkProfiles(g.profiles),
-	}, nil
+	}
 }
 
 func resolveProfiles(custom map[string]ProfileConfig) map[string]policyProfile {
@@ -263,6 +395,129 @@ func requestActionType(req sdk.GuardianRequest) string {
 		return actionUnknown
 	}
 	return actionTypes[0]
+}
+
+func approvalTimeout(raw string) time.Duration {
+	if raw == "" {
+		return defaultApprovalTimeout
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout < 0 {
+		return defaultApprovalTimeout
+	}
+	return timeout
+}
+
+func (g *Guardian) publishDecision(decision sdk.GuardianDecision) {
+	if g.bus != nil {
+		g.bus.Publish(sdk.NewEvent(sdk.GuardianDecisionTopic, decision))
+	}
+}
+
+func (g *Guardian) newApproval(req sdk.GuardianRequest, decision sdk.GuardianDecision) sdk.GuardianApproval {
+	decisionID := decision.ID
+	if decisionID == "" {
+		decisionID = g.nextIdentifier("decision")
+	}
+	approvalID := "approval-" + decisionID
+
+	return sdk.GuardianApproval{
+		ID:            approvalID,
+		DecisionID:    decisionID,
+		Request:       req,
+		AllowedScopes: []sdk.GuardianGrantScope{sdk.GuardianGrantScopeOnce, sdk.GuardianGrantScopeSession, sdk.GuardianGrantScopeProfile},
+		Reason:        decision.Reason,
+	}
+}
+
+func (g *Guardian) nextIdentifier(prefix string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.nextID++
+	return fmt.Sprintf("%s-%d", prefix, g.nextID)
+}
+
+func (g *Guardian) waitForResolution(ctx context.Context, pending *pendingApproval) (sdk.GuardianResolution, bool) {
+	var timeout <-chan time.Time
+	if g.approvalTimeout > 0 {
+		timer := time.NewTimer(g.approvalTimeout)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+
+	select {
+	case resolution := <-pending.result:
+		return resolution, true
+	case <-ctx.Done():
+		return sdk.GuardianResolution{}, false
+	case <-timeout:
+		return sdk.GuardianResolution{}, false
+	}
+}
+
+func (g *Guardian) matchingGrant(req sdk.GuardianRequest, decision sdk.GuardianDecision) (sdk.GuardianGrant, bool) {
+	actionType, _ := decision.Metadata[actionTypeMetadataKey].(string)
+	if actionType == "" {
+		return sdk.GuardianGrant{}, false
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for _, grant := range g.grants {
+		if grant.Resolution.Action != sdk.GuardianResolutionAllow {
+			continue
+		}
+		if grant.Scope != sdk.GuardianGrantScopeSession && grant.Scope != sdk.GuardianGrantScopeProfile {
+			continue
+		}
+		if grant.Scope == sdk.GuardianGrantScopeProfile {
+			if grantProfile, _ := grant.Request.Metadata[profileMetadataKey].(string); grantProfile != decision.Profile {
+				continue
+			}
+		}
+		if requestActionType(grant.Request) == actionType {
+			return grant, true
+		}
+	}
+	return sdk.GuardianGrant{}, false
+}
+
+func (g *Guardian) applyGrant(approval sdk.GuardianApproval, resolution sdk.GuardianResolution) {
+	scope := resolution.Scope
+	if scope == "" {
+		scope = sdk.GuardianGrantScopeOnce
+	}
+	if scope == sdk.GuardianGrantScopeOnce {
+		return
+	}
+
+	request := approval.Request
+	if request.Metadata == nil {
+		request.Metadata = make(map[string]any)
+	}
+	request.Metadata[actionTypeMetadataKey] = requestActionType(approval.Request)
+	request.Metadata[profileMetadataKey] = g.cfg.Profile
+
+	grant := sdk.GuardianGrant{
+		ID:         g.nextIdentifier("grant"),
+		Scope:      scope,
+		Request:    request,
+		Resolution: resolution,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	g.mu.Lock()
+	g.grants = append(g.grants, grant)
+	g.mu.Unlock()
+}
+
+func resolutionReason(resolution sdk.GuardianResolution, fallback string) string {
+	if resolution.Reason != "" {
+		return resolution.Reason
+	}
+	return fallback
 }
 
 func requestActionTypes(req sdk.GuardianRequest) []string {
