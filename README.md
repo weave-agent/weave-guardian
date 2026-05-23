@@ -40,6 +40,18 @@ Fields:
 - `approval_timeout`: duration to wait for an approval resolution before denying an ask decision. Defaults to `2m`.
 - `profiles`: custom profiles. Each custom profile extends `ask` by default, or the configured `extends` profile, and can override action decisions with `allow`, `ask`, or `block`.
 
+## SDK Integration
+
+Guardian implements `sdk.Guardian` with `Decide`, `Resolve`, and `Snapshot`. The extension publishes and listens on the SDK Guardian bus topics:
+
+- `guardian.registered`: publishes the `sdk.Guardian` implementation.
+- `guardian.decision`: publishes each completed `sdk.GuardianDecision`.
+- `guardian.approval.request`: publishes `sdk.GuardianApprovalRequest` for ask decisions.
+- `guardian.approval.resolution`: accepts and publishes `sdk.GuardianApprovalResolution`.
+- `guardian.snapshot.request`: requests a current snapshot.
+- `guardian.snapshot`: publishes `sdk.GuardianSnapshot`.
+- `guardian.grants.clear`: accepts `sdk.GuardianClearGrantsRequest`, or `nil` to clear all grants.
+
 ## Action Classification
 
 Guardian classifies SDK requests into action types such as:
@@ -58,4 +70,6 @@ Shell commands are tokenized with quote-aware parsing, shell wrappers such as `b
 
 Ask decisions publish ID-based approval requests. Resolutions can allow or deny once, for the current session, or for the active profile. Session and profile grants match future requests by normalized action type.
 
-Guardian records recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp. Snapshots include the active profile, resolved profiles, pending approvals, and current grants. Clear-grants events can remove all grants or selected grant scopes and IDs.
+In headless mode, ask decisions are blocked immediately without publishing an approval request. Outside headless mode, ask decisions wait up to `approval_timeout`; timeout or context cancellation blocks the action.
+
+Guardian records recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp. `RecentDecisions()` returns the last 100 records; this audit history is separate from SDK snapshots. Snapshots include the active profile, resolved profiles, pending approvals, and current grants. Clear-grants events can remove all grants or selected grant scopes and IDs.

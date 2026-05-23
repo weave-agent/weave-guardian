@@ -2,6 +2,7 @@ package guardian
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -941,6 +942,9 @@ func TestSnapshotIncludesResolvedProfiles(t *testing.T) {
 	require.Contains(t, snapshot.Profiles, "team")
 	assert.Equal(t, "team", snapshot.Profiles["team"].Name)
 	assert.NotEmpty(t, snapshot.Profiles["team"].Rules)
+	assertProfileRule(t, snapshot.Profiles["team"], actionNetworkWrite, sdk.GuardianDecisionAsk)
+	assertProfileRule(t, snapshot.Profiles["team"], actionFileRead, sdk.GuardianDecisionAllow)
+	assertProfileRule(t, snapshot.Profiles["team"], actionCommandExecRemote, sdk.GuardianDecisionBlock)
 }
 
 func TestDecisionHistoryRecordsRecentDecisionsWithLimit(t *testing.T) {
@@ -949,7 +953,7 @@ func TestDecisionHistoryRecordsRecentDecisionsWithLimit(t *testing.T) {
 
 	for i := range defaultDecisionLimit + 5 {
 		decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
-			ID:          "req-history-" + string(rune('a'+i%26)),
+			ID:          fmt.Sprintf("req-history-%03d", i),
 			ToolName:    "shell",
 			Action:      sdk.GuardianActionExec,
 			Command:     "go test ./...",
@@ -962,6 +966,8 @@ func TestDecisionHistoryRecordsRecentDecisionsWithLimit(t *testing.T) {
 
 	history := g.RecentDecisions()
 	require.Len(t, history, defaultDecisionLimit)
+	assert.Equal(t, "req-history-005", history[0].RequestID)
+	assert.Equal(t, "req-history-104", history[len(history)-1].RequestID)
 
 	first := history[0]
 	assert.Equal(t, actionPackageTest, first.ActionType)
@@ -1029,6 +1035,59 @@ func TestSnapshotIncludesSessionGrants(t *testing.T) {
 	assert.NotEmpty(t, snapshot.Grants[0].CreatedAt)
 }
 
+func TestSnapshotIncludesPendingApprovals(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type decideResult struct {
+		decision sdk.GuardianDecision
+		err      error
+	}
+	done := make(chan decideResult, 1)
+	workingDir := t.TempDir()
+	go func() {
+		decision, err := g.Decide(ctx, sdk.GuardianRequest{
+			ID:         "req-pending",
+			Action:     sdk.GuardianActionWrite,
+			Path:       "pending.txt",
+			WorkingDir: workingDir,
+		})
+		done <- decideResult{decision: decision, err: err}
+	}()
+
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			if ev.Topic == sdk.GuardianApprovalRequestTopic {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Pending, 1)
+	assert.Equal(t, "approval-req-pending", snapshot.Pending[0].ID)
+	assert.Equal(t, "req-pending", snapshot.Pending[0].DecisionID)
+	assert.Equal(t, "req-pending", snapshot.Pending[0].Request.ID)
+	assert.Equal(t, "file writes require approval", snapshot.Pending[0].Reason)
+
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case result := <-done:
+			require.NoError(t, result.err)
+			return result.decision.Action == sdk.GuardianDecisionBlock
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+}
+
 func TestClearGrantsEventClearsMatchingGrants(t *testing.T) {
 	g := New(Config{Profile: "ask"})
 	g.grants = []sdk.GuardianGrant{
@@ -1051,6 +1110,27 @@ func TestClearGrantsEventClearsMatchingGrants(t *testing.T) {
 	snapshot, err = g.Snapshot(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, snapshot.Grants)
+}
+
+func TestClearGrantsEventClearsMatchingGrantIDs(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	g.grants = []sdk.GuardianGrant{
+		{ID: "grant-one", Scope: sdk.GuardianGrantScopeSession},
+		{ID: "grant-two", Scope: sdk.GuardianGrantScopeSession},
+		{ID: "grant-three", Scope: sdk.GuardianGrantScopeProfile},
+	}
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianClearGrantsTopic, sdk.GuardianClearGrantsRequest{
+		GrantIDs: []string{"grant-two"},
+	}))
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Grants, 2)
+	assert.Equal(t, "grant-one", snapshot.Grants[0].ID)
+	assert.Equal(t, "grant-three", snapshot.Grants[1].ID)
 }
 
 func TestApprovalAllowResolutionAllowsAskDecision(t *testing.T) {
@@ -1085,7 +1165,36 @@ func TestApprovalAllowResolutionAllowsAskDecision(t *testing.T) {
 	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
 	assert.Equal(t, "approved for test", decision.Reason)
 	assert.Nil(t, decision.Approval)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
 	assertPublishedDecision(t, bus, "req-write", sdk.GuardianDecisionAllow)
+}
+
+func TestApprovalAllowResolutionWithEmptyScopeDoesNotPersistGrant(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Reason: "approved once by default",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-empty-scope",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
 }
 
 func TestApprovalDenyResolutionBlocksAskDecision(t *testing.T) {
@@ -1130,6 +1239,53 @@ func TestApprovalTimeoutBlocksAskDecision(t *testing.T) {
 	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
 	assert.Equal(t, "approval timed out", decision.Reason)
 	assertPublishedDecision(t, bus, "req-timeout", sdk.GuardianDecisionBlock)
+}
+
+func TestApprovalContextCancellationBlocksAskDecisionAndClearsPending(t *testing.T) {
+	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type decideResult struct {
+		decision sdk.GuardianDecision
+		err      error
+	}
+	done := make(chan decideResult, 1)
+	workingDir := t.TempDir()
+	go func() {
+		decision, err := g.Decide(ctx, sdk.GuardianRequest{
+			ID:         "req-cancel",
+			Action:     sdk.GuardianActionWrite,
+			Path:       "out.txt",
+			WorkingDir: workingDir,
+		})
+		done <- decideResult{decision: decision, err: err}
+	}()
+
+	require.Eventually(t, func() bool {
+		snapshot, err := g.Snapshot(context.Background())
+		return err == nil && len(snapshot.Pending) == 1
+	}, time.Second, time.Millisecond)
+
+	cancel()
+	var decision sdk.GuardianDecision
+	require.Eventually(t, func() bool {
+		select {
+		case result := <-done:
+			require.NoError(t, result.err)
+			decision = result.decision
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Pending)
+	assertPublishedDecision(t, bus, "req-cancel", sdk.GuardianDecisionBlock)
 }
 
 func TestSessionGrantMatchesFutureAskDecision(t *testing.T) {
@@ -1437,6 +1593,19 @@ func assertPublishedDecision(t *testing.T, bus *stubBus, requestID string, actio
 		}
 		return false
 	}, time.Second, time.Millisecond)
+}
+
+func assertProfileRule(t *testing.T, profile sdk.GuardianProfile, actionType string, decision sdk.GuardianDecisionAction) {
+	t.Helper()
+
+	for _, rule := range profile.Rules {
+		if rule.Metadata[actionTypeMetadataKey] == actionType {
+			assert.Equal(t, decision, rule.Decision)
+			assert.NotEmpty(t, rule.Reason)
+			return
+		}
+	}
+	t.Fatalf("profile %s has no rule for action type %s", profile.Name, actionType)
 }
 
 func requestForActionType(actionType string) sdk.GuardianRequest {

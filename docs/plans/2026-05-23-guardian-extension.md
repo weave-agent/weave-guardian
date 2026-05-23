@@ -107,7 +107,8 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 
 ### Task 9: Implement decision history and snapshots
 - [x] record recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp
-- [x] implement `Snapshot` for active profile, recent decisions, and session grants
+- [x] implement `Snapshot` for active profile, resolved profiles, pending approvals, and session grants
+- [x] expose recent decisions through `RecentDecisions`
 - [x] handle snapshot request and grants clear events
 - [x] write tests for decision history limits, snapshot payloads, and clearing grants
 - [x] run `go test ./...` - must pass before task 10

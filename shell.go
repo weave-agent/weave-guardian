@@ -15,7 +15,6 @@ const (
 )
 
 type shellCommand struct {
-	Raw    string
 	Stages []shellStage
 	Issues []string
 }
@@ -581,14 +580,11 @@ func isBuildScript(script string) bool {
 }
 
 func findMutates(args []string) bool {
-	for i, arg := range args {
+	for _, arg := range args {
 		switch arg {
 		case "-delete", "-exec", "-execdir":
 			return true
 		case "-ok", "-okdir":
-			return true
-		}
-		if i > 0 && (arg == ">" || arg == ">>") {
 			return true
 		}
 	}
@@ -686,7 +682,7 @@ func isWriteHTTPMethod(method string) bool {
 }
 
 func decomposeShellCommand(command string) shellCommand {
-	parsed := shellCommand{Raw: command}
+	parsed := shellCommand{}
 	tokens, issues := tokenizeShell(command)
 	parsed.Issues = append(parsed.Issues, issues...)
 	if len(tokens) == 0 {
