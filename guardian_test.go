@@ -454,6 +454,98 @@ func TestDecideUsesFileClassifierWhenMetadataIsAbsent(t *testing.T) {
 	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
 }
 
+func TestTokenizeShellCommandPreservesQuotedStrings(t *testing.T) {
+	tokens, issues := tokenizeShell(`printf 'hello world' "and spaces" escaped\ value`)
+
+	require.Empty(t, issues)
+	assert.Equal(t, []string{"printf", "hello world", "and spaces", "escaped value"}, tokens)
+}
+
+func TestDecomposeShellCommandUnwrapsShellWrappers(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    [][]string
+	}{
+		{
+			name:    "bash c",
+			command: `bash -c "git status && go test ./..."`,
+			want:    [][]string{{"git", "status"}, {"go", "test", "./..."}},
+		},
+		{
+			name:    "bash lc",
+			command: `bash -lc "echo quoted value | wc -c"`,
+			want:    [][]string{{"echo", "quoted", "value"}, {"wc", "-c"}},
+		},
+		{
+			name:    "eval",
+			command: `eval "printf ok; command git status"`,
+			want:    [][]string{{"printf", "ok"}, {"git", "status"}},
+		},
+		{
+			name:    "command builtin",
+			command: `command -p git status --short`,
+			want:    [][]string{{"git", "status", "--short"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed := decomposeShellCommand(tt.command)
+			require.Empty(t, parsed.Issues)
+			require.Len(t, parsed.Stages, len(tt.want))
+			for i, want := range tt.want {
+				assert.Equal(t, want, parsed.Stages[i].Tokens)
+			}
+		})
+	}
+}
+
+func TestDecomposeShellCommandSplitsCompoundsAndRedirects(t *testing.T) {
+	parsed := decomposeShellCommand(`cat < input.txt | grep "needle value" > output.txt && rm output.txt; touch done`)
+
+	require.Empty(t, parsed.Issues)
+	require.Len(t, parsed.Stages, 4)
+	assert.Equal(t, []string{"cat"}, parsed.Stages[0].Tokens)
+	assert.Equal(t, "|", parsed.Stages[0].Operator)
+	assert.Equal(t, []shellRedirect{{Operator: "<", Target: "input.txt"}}, parsed.Stages[0].Redirects)
+
+	assert.Equal(t, []string{"grep", "needle value"}, parsed.Stages[1].Tokens)
+	assert.Equal(t, "&&", parsed.Stages[1].Operator)
+	assert.Equal(t, []shellRedirect{{Operator: ">", Target: "output.txt"}}, parsed.Stages[1].Redirects)
+
+	assert.Equal(t, []string{"rm", "output.txt"}, parsed.Stages[2].Tokens)
+	assert.Equal(t, ";", parsed.Stages[2].Operator)
+	assert.Equal(t, []string{"touch", "done"}, parsed.Stages[3].Tokens)
+	assert.Empty(t, parsed.Stages[3].Operator)
+}
+
+func TestShellParserReportsObfuscationLimits(t *testing.T) {
+	tests := []string{
+		`printf "unterminated`,
+		`echo ok >`,
+	}
+
+	for _, command := range tests {
+		t.Run(command, func(t *testing.T) {
+			parsed := decomposeShellCommand(command)
+			require.NotEmpty(t, parsed.Issues)
+			assert.Contains(t, parsed.Issues[0], shellUnsupportedSyntaxID)
+			assert.Equal(t, actionCommandObfuscated, classifyExecCommand(command))
+		})
+	}
+}
+
+func TestExecRequestUsesShellParserObfuscationResult(t *testing.T) {
+	req := sdk.GuardianRequest{
+		ID:      "req-exec",
+		Action:  sdk.GuardianActionExec,
+		Command: `printf "unterminated`,
+	}
+
+	assert.Equal(t, actionCommandObfuscated, classifyRequest(req))
+}
+
 func TestSnapshotIncludesResolvedProfiles(t *testing.T) {
 	g := New(Config{
 		Profile: "team",

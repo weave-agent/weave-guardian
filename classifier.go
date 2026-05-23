@@ -18,7 +18,6 @@ const (
 	actionPolicyRead    = "policy.read"
 	actionPolicyWrite   = "policy.write"
 	actionSecretRead    = "secret.read"
-	actionCommandExec   = "command.exec_local"
 	actionNetworkRead   = "network.read"
 	actionUnknown       = "unknown"
 )
@@ -36,7 +35,7 @@ func classifyRequest(req sdk.GuardianRequest) string {
 	case sdk.GuardianActionRead, sdk.GuardianActionWrite, sdk.GuardianActionDelete:
 		return classifyFileAction(req)
 	case sdk.GuardianActionExec:
-		return actionCommandExec
+		return classifyExecCommand(req.Command)
 	case sdk.GuardianActionNetwork:
 		return actionNetworkRead
 	default:

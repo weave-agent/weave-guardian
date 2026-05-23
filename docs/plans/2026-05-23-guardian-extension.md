@@ -69,11 +69,11 @@ Guardian exposes three built-in profiles: `ask`, `auto`, and `yolo`. Users can d
 - [x] run `go test ./...` - must pass before task 4
 
 ### Task 4: Implement shell parser and command decomposition
-- [ ] tokenize bash commands with quote-aware parsing
-- [ ] unwrap shell wrappers such as `bash -c`, `sh -c`, `zsh -c`, `eval`, and `command`
-- [ ] split compound commands on pipes, logical operators, sequences, and redirects
-- [ ] write tests for wrapper unwrapping, compound splitting, quoted strings, and obfuscation limits
-- [ ] run `go test ./...` - must pass before task 5
+- [x] tokenize bash commands with quote-aware parsing
+- [x] unwrap shell wrappers such as `bash -c`, `sh -c`, `zsh -c`, `eval`, and `command`
+- [x] split compound commands on pipes, logical operators, sequences, and redirects
+- [x] write tests for wrapper unwrapping, compound splitting, quoted strings, and obfuscation limits
+- [x] run `go test ./...` - must pass before task 5
 
 ### Task 5: Implement core command classifiers
 - [ ] classify git commands into `git.read`, `git.write`, `git.discard`, `git.remote_write`, and `git.history_rewrite`
