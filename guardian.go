@@ -193,7 +193,7 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 	if resolution.Action == sdk.GuardianResolutionAllow {
 		decision.Action = sdk.GuardianDecisionAllow
 		decision.Reason = resolutionReason(resolution, "approved")
-		g.applyGrant(approval, resolution)
+		g.applyGrant(approval, decision, resolution)
 	} else {
 		decision.Action = sdk.GuardianDecisionBlock
 		decision.Reason = resolutionReason(resolution, "denied")
@@ -270,6 +270,10 @@ func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision 
 	}
 	for _, candidateType := range actionTypes {
 		candidateRule, ok := profile.rules[candidateType]
+		if hardRule, hard := hardBlockRule(candidateType); hard {
+			candidateRule = hardRule
+			ok = true
+		}
 		if !ok {
 			candidateRule = policyRule{
 				decision: sdk.GuardianDecisionBlock,
@@ -330,6 +334,9 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 
 	rules := copyRules(base.rules)
 	for actionType, decision := range cfg.Actions {
+		if _, hard := hardBlockRule(actionType); hard {
+			continue
+		}
 		rules[actionType] = policyRule{
 			decision: normalizeDecision(decision),
 			reason:   fmt.Sprintf("custom profile %s overrides %s", name, actionType),
@@ -348,14 +355,7 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 }
 
 func builtInProfiles() map[string]policyProfile {
-	hardBlocks := map[string]string{ //nolint:gosec // Action names mention secrets but are policy taxonomy, not credentials.
-		"command.exec_remote":      "remote code execution is blocked",
-		"command.obfuscated":       "obfuscated command payloads are blocked",
-		"command.dangerous_delete": "dangerous delete operations are blocked",
-		"file.write_protected":     "protected path writes are blocked",
-		"policy.write":             "policy tampering is blocked",
-		"secret.exfiltrate":        "secret exfiltration is blocked",
-	}
+	hardBlocks := hardBlockReasons()
 
 	askRules := map[string]policyRule{
 		"file.read":              allowRule("project file reads are allowed"),
@@ -571,14 +571,14 @@ func (g *Guardian) matchingGrant(decision sdk.GuardianDecision) (sdk.GuardianGra
 				continue
 			}
 		}
-		if requestActionType(grant.Request) == actionType {
+		if grantActionType(grant.Request) == actionType {
 			return grant, true
 		}
 	}
 	return sdk.GuardianGrant{}, false
 }
 
-func (g *Guardian) applyGrant(approval sdk.GuardianApproval, resolution sdk.GuardianResolution) {
+func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.GuardianDecision, resolution sdk.GuardianResolution) {
 	scope := resolution.Scope
 	if scope == "" {
 		scope = sdk.GuardianGrantScopeOnce
@@ -591,7 +591,7 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, resolution sdk.Guar
 	if request.Metadata == nil {
 		request.Metadata = make(map[string]any)
 	}
-	request.Metadata[actionTypeMetadataKey] = requestActionType(approval.Request)
+	request.Metadata[actionTypeMetadataKey] = decision.Metadata[actionTypeMetadataKey]
 	request.Metadata[profileMetadataKey] = g.cfg.Profile
 
 	grant := sdk.GuardianGrant{
@@ -652,7 +652,7 @@ func resolutionReason(resolution sdk.GuardianResolution, fallback string) string
 }
 
 func requestActionTypes(req sdk.GuardianRequest) []string {
-	if req.Metadata != nil {
+	if req.Action == sdk.GuardianActionUnknown && req.Metadata != nil {
 		if raw, ok := req.Metadata[actionTypeMetadataKey]; ok {
 			if actionType, ok := raw.(string); ok && actionType != "" {
 				return []string{actionType}
@@ -665,6 +665,38 @@ func requestActionTypes(req sdk.GuardianRequest) []string {
 	}
 
 	return []string{classifyRequest(req)}
+}
+
+func grantActionType(req sdk.GuardianRequest) string {
+	if req.Metadata != nil {
+		if raw, ok := req.Metadata[actionTypeMetadataKey]; ok {
+			if actionType, ok := raw.(string); ok && actionType != "" {
+				return actionType
+			}
+		}
+	}
+
+	return requestActionType(req)
+}
+
+func hardBlockReasons() map[string]string {
+	return map[string]string{ //nolint:gosec // Action names mention secrets but are policy taxonomy, not credentials.
+		"command.exec_remote":      "remote code execution is blocked",
+		"command.obfuscated":       "obfuscated command payloads are blocked",
+		"command.dangerous_delete": "dangerous delete operations are blocked",
+		"file.write_protected":     "protected path writes are blocked",
+		"policy.write":             "policy tampering is blocked",
+		"secret.exfiltrate":        "secret exfiltration is blocked",
+	}
+}
+
+func hardBlockRule(actionType string) (policyRule, bool) {
+	reason, ok := hardBlockReasons()[actionType]
+	if !ok {
+		return policyRule{}, false
+	}
+
+	return blockRule(reason), true
 }
 
 func shouldUseDecision(candidateType string, candidateRule policyRule, currentType string, currentRule policyRule) bool {
