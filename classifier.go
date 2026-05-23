@@ -59,15 +59,15 @@ func classifyRequest(req sdk.GuardianRequest) string {
 }
 
 func classifyNetworkAction(req sdk.GuardianRequest) string {
+	method := metadataString(req.Metadata, "method", "http_method", "http.method")
+	if isWriteHTTPMethod(method) {
+		return actionNetworkWrite
+	}
 	if actionType, ok := metadataActionType(req.Metadata); ok {
 		switch actionType {
 		case actionNetworkRead, actionNetworkWrite:
 			return actionType
 		}
-	}
-	method := metadataString(req.Metadata, "method", "http_method", "http.method")
-	if isWriteHTTPMethod(method) {
-		return actionNetworkWrite
 	}
 	return actionNetworkRead
 }

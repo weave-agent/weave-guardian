@@ -25,16 +25,9 @@ const (
 
 // Config holds guardian extension settings.
 type Config struct {
-	Profile         string                   `json:"profile" default:"ask" env:"PROFILE" description:"Active guardian policy profile"`
-	ApprovalTimeout string                   `json:"approval_timeout,omitempty" default:"2m" description:"How long to wait for ask-mode approval before denying"`
-	Profiles        map[string]ProfileConfig `json:"profiles,omitempty" description:"Custom guardian policy profiles"`
-}
-
-// ProfileConfig defines a user profile by extending a built-in or custom
-// profile and replacing selected action decisions.
-type ProfileConfig struct {
-	Extends string            `json:"extends,omitempty"`
-	Actions map[string]string `json:"actions,omitempty"`
+	Profile         string                         `json:"profile" default:"ask" env:"PROFILE" description:"Active guardian policy profile"`
+	ApprovalTimeout string                         `json:"approval_timeout,omitempty" default:"2m" description:"How long to wait for ask-mode approval before denying"`
+	Profiles        map[string]sdk.GuardianProfile `json:"profiles,omitempty" description:"Custom guardian policy profiles"`
 }
 
 type policyProfile struct {
@@ -168,6 +161,11 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 	approval := g.newApproval(req, decision)
 	decision.Approval = &approval
 	if g.bus == nil {
+		if g.approvalTimeout != defaultApprovalTimeout {
+			decision.Action = sdk.GuardianDecisionBlock
+			decision.Reason = "approval unavailable"
+			decision.Approval = nil
+		}
 		g.recordDecision(req, decision)
 		return decision, nil
 	}
@@ -302,7 +300,7 @@ func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision 
 	}
 }
 
-func resolveProfiles(custom map[string]ProfileConfig) map[string]policyProfile {
+func resolveProfiles(custom map[string]sdk.GuardianProfile) map[string]policyProfile {
 	profiles := builtInProfiles()
 
 	for name := range custom {
@@ -312,7 +310,7 @@ func resolveProfiles(custom map[string]ProfileConfig) map[string]policyProfile {
 	return profiles
 }
 
-func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles map[string]policyProfile, resolving map[string]bool) policyProfile {
+func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, profiles map[string]policyProfile, resolving map[string]bool) policyProfile {
 	if profile, ok := profiles[name]; ok {
 		return profile
 	}
@@ -322,7 +320,7 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 
 	resolving[name] = true
 	cfg := custom[name]
-	baseName := cfg.Extends
+	baseName := profileExtends(cfg)
 	if baseName == "" {
 		baseName = defaultProfile
 	}
@@ -337,12 +335,33 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 	}
 
 	rules := copyRules(base.rules)
-	for actionType, decision := range cfg.Actions {
+	for _, override := range cfg.Rules {
+		actionTypes := profileRuleActionTypes(override)
+		if len(actionTypes) == 0 {
+			continue
+		}
+		decision := override.Decision
+		reason := override.Reason
+		if reason == "" {
+			reason = fmt.Sprintf("custom profile %s overrides action", name)
+		}
+		for _, actionType := range actionTypes {
+			if _, hard := hardBlockRule(actionType); hard {
+				continue
+			}
+			rules[actionType] = policyRule{
+				decision: normalizeDecision(decision),
+				reason:   reason,
+			}
+		}
+	}
+
+	for actionType, decision := range legacyProfileActions(cfg) {
 		if _, hard := hardBlockRule(actionType); hard {
 			continue
 		}
 		rules[actionType] = policyRule{
-			decision: normalizeDecision(decision),
+			decision: normalizeDecision(sdk.GuardianDecisionAction(decision)),
 			reason:   fmt.Sprintf("custom profile %s overrides %s", name, actionType),
 		}
 	}
@@ -356,6 +375,52 @@ func resolveCustomProfile(name string, custom map[string]ProfileConfig, profiles
 	resolving[name] = false
 
 	return profile
+}
+
+func profileExtends(profile sdk.GuardianProfile) string {
+	if profile.Metadata == nil {
+		return ""
+	}
+	extends, _ := profile.Metadata["extends"].(string)
+	return extends
+}
+
+func profileRuleActionTypes(rule sdk.GuardianProfileRule) []string {
+	types := make([]string, 0, len(rule.Actions)+1)
+	if rule.Metadata != nil {
+		if actionType, ok := metadataActionType(rule.Metadata); ok {
+			types = append(types, actionType)
+		}
+	}
+	for _, action := range rule.Actions {
+		switch action {
+		case sdk.GuardianActionRead:
+			types = append(types, actionFileRead)
+		case sdk.GuardianActionWrite:
+			types = append(types, actionFileWrite)
+		case sdk.GuardianActionDelete:
+			types = append(types, actionFileDelete)
+		case sdk.GuardianActionExec:
+			types = append(types, actionCommandExecLocal)
+		case sdk.GuardianActionNetwork:
+			types = append(types, actionNetworkRead, actionNetworkWrite)
+		case sdk.GuardianActionUnknown:
+			types = append(types, actionUnknown)
+		}
+	}
+	return types
+}
+
+func legacyProfileActions(profile sdk.GuardianProfile) map[string]string {
+	if profile.Metadata == nil {
+		return nil
+	}
+	raw, ok := profile.Metadata["actions"]
+	if !ok {
+		return nil
+	}
+	actions, _ := raw.(map[string]string)
+	return actions
 }
 
 func builtInProfiles() map[string]policyProfile {
@@ -774,10 +839,10 @@ func decisionRank(decision sdk.GuardianDecisionAction) int {
 	}
 }
 
-func normalizeDecision(decision string) sdk.GuardianDecisionAction {
-	switch sdk.GuardianDecisionAction(decision) {
+func normalizeDecision(decision sdk.GuardianDecisionAction) sdk.GuardianDecisionAction {
+	switch decision {
 	case sdk.GuardianDecisionAllow, sdk.GuardianDecisionAsk, sdk.GuardianDecisionBlock:
-		return sdk.GuardianDecisionAction(decision)
+		return decision
 	default:
 		return sdk.GuardianDecisionBlock
 	}

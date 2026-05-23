@@ -68,7 +68,15 @@ func classifyExecCommandActions(command string) []string {
 	return stageActions
 }
 
-func classifyShellStage(stage shellStage) string { //nolint:gocyclo // Command family classification is intentionally centralized.
+func classifyShellStage(stage shellStage) string {
+	actionType := classifyShellStageBase(stage)
+	if redirectAction, ok := classifyRedirectWrites(stage.Redirects); ok && commandActionRank(redirectAction) > commandActionRank(actionType) {
+		return redirectAction
+	}
+	return actionType
+}
+
+func classifyShellStageBase(stage shellStage) string { //nolint:gocyclo // Command family classification is intentionally centralized.
 	if len(stage.Tokens) == 0 {
 		if actionType, ok := classifyRedirectWrites(stage.Redirects); ok {
 			return actionType
@@ -329,9 +337,23 @@ func hasCheckoutPathspec(args []string) bool {
 	return false
 }
 
-func classifyNetworkCommand(name string, args []string) string { //nolint:gocyclo // HTTP clients expose several equivalent write indicators.
-	if actionType, ok := classifyNetworkOutputWrite(name, args); ok {
-		return actionType
+func classifyNetworkCommand(name string, args []string) string {
+	requestAction := classifyNetworkRequestAction(name, args)
+	if requestAction == actionSecretExfiltrate {
+		return requestAction
+	}
+	if outputAction, ok := classifyNetworkOutputWrite(name, args); ok {
+		if commandActionRank(outputAction) > commandActionRank(requestAction) {
+			return outputAction
+		}
+		return requestAction
+	}
+	return requestAction
+}
+
+func classifyNetworkRequestAction(name string, args []string) string { //nolint:gocyclo // HTTP clients expose several equivalent write indicators.
+	if networkUploadReferencesSensitivePath(name, args) {
+		return actionSecretExfiltrate
 	}
 	if name == "wget" && (hasLongFlag(args, "post-data") || hasLongFlag(args, "post-file") || hasLongFlag(args, "body-data") || hasLongFlag(args, "body-file")) {
 		return actionNetworkWrite
@@ -802,6 +824,66 @@ func isNetworkBodyFlag(arg string) bool {
 		strings.HasPrefix(arg, "--data-binary=") || strings.HasPrefix(arg, "--form=")
 }
 
+func networkUploadReferencesSensitivePath(name string, args []string) bool {
+	for i := range args {
+		arg := args[i]
+		lower := strings.ToLower(arg)
+		if sensitiveNetworkUploadValue(networkFlagValue(lower, arg, args, i)) {
+			return true
+		}
+		if name == "wget" && strings.HasPrefix(lower, "--post-file=") && isSensitiveShellPath(arg[len("--post-file="):]) {
+			return true
+		}
+		if name == "wget" && lower == "--post-file" && i+1 < len(args) && isSensitiveShellPath(args[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func networkFlagValue(lower, original string, args []string, index int) string {
+	for _, prefix := range []string{"--data=", "--data-raw=", "--data-binary=", "--form="} {
+		if strings.HasPrefix(lower, prefix) {
+			return original[len(prefix):]
+		}
+	}
+	if lower == "-d" || lower == "--data" || lower == "--data-raw" || lower == "--data-binary" || lower == "--form" || lower == "-f" {
+		if index+1 < len(args) {
+			return args[index+1]
+		}
+		return ""
+	}
+	if strings.HasPrefix(lower, "-d") && len(original) > 2 {
+		return original[2:]
+	}
+	if strings.HasPrefix(lower, "-f") && len(original) > 2 {
+		return original[2:]
+	}
+	return ""
+}
+
+func sensitiveNetworkUploadValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "@") {
+		return isSensitiveShellPath(value[1:])
+	}
+	if _, path, ok := strings.Cut(value, "=@"); ok {
+		return isSensitiveShellPath(path)
+	}
+	return false
+}
+
+func isSensitiveShellPath(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "-") {
+		return false
+	}
+	path := normalizeRequestPath(raw, "/")
+	return isSensitivePath(path)
+}
+
 func isReadHTTPMethod(method string) bool {
 	switch strings.ToUpper(method) {
 	case "GET", "HEAD", "OPTIONS":
@@ -842,7 +924,7 @@ func decomposeShellCommand(command string) shellCommand {
 func tokenizeShell(command string) ([]string, []string) {
 	var tokens []string
 	var current strings.Builder
-	var issues []string
+	issues := shellExpansionIssues(command)
 	var quote rune
 	escaped := false
 	tokenStarted := false
@@ -907,6 +989,13 @@ func tokenizeShell(command string) ([]string, []string) {
 	flush()
 
 	return tokens, issues
+}
+
+func shellExpansionIssues(command string) []string {
+	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
+		return []string{shellUnsupportedSyntaxID + ": shell expansion"}
+	}
+	return nil
 }
 
 func isShellWhitespace(r rune) bool {

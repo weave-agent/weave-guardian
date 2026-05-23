@@ -24,11 +24,25 @@ Example configuration:
   "approval_timeout": "2m",
   "profiles": {
     "team": {
-      "extends": "auto",
-      "actions": {
-        "network.read": "ask",
-        "package.global_install": "block"
-      }
+      "metadata": {
+        "extends": "auto"
+      },
+      "rules": [
+        {
+          "decision": "ask",
+          "reason": "network reads require team approval",
+          "metadata": {
+            "action_type": "network.read"
+          }
+        },
+        {
+          "decision": "block",
+          "reason": "global installs are disabled",
+          "metadata": {
+            "action_type": "package.global_install"
+          }
+        }
+      ]
     }
   }
 }
@@ -38,7 +52,7 @@ Fields:
 
 - `profile`: active profile name. Defaults to `ask`; unknown profile names fall back to `ask`.
 - `approval_timeout`: duration to wait for an approval resolution before denying an ask decision. Defaults to `2m`.
-- `profiles`: custom profiles. Each custom profile extends `ask` by default, or the configured `extends` profile, and can override action decisions with `allow`, `ask`, or `block`.
+- `profiles`: custom profiles keyed by profile name using the shared SDK profile shape. Each custom profile extends `ask` by default, or the profile named by `metadata.extends`, and can override detailed action types through rules whose metadata includes `action_type`.
 
 ## SDK Integration
 
