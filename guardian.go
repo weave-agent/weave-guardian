@@ -113,6 +113,14 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 		g.resolve(payload.DecisionID, payload.Resolution, false)
 		return nil
 	})
+	bus.On(sdk.GuardianProfileChangeTopic, func(ev sdk.Event) error {
+		payload, ok := ev.Payload.(sdk.GuardianProfileChange)
+		if !ok {
+			return nil
+		}
+		g.changeProfile(payload.CurrentProfile)
+		return nil
+	})
 	bus.On(sdk.GuardianSnapshotRequestTopic, func(sdk.Event) error {
 		snapshot, err := g.Snapshot(context.Background())
 		if err != nil {
@@ -225,6 +233,7 @@ func (g *Guardian) resolve(decisionID string, resolution sdk.GuardianResolution,
 
 func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	g.mu.Lock()
+	currentProfile := g.cfg.Profile
 	grants := make([]sdk.GuardianGrant, 0, len(g.grants))
 	for _, grant := range g.grants {
 		grants = append(grants, cloneGuardianGrant(grant))
@@ -237,11 +246,26 @@ func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	g.mu.Unlock()
 
 	return sdk.GuardianSnapshot{
-		CurrentProfile: g.cfg.Profile,
+		CurrentProfile: currentProfile,
 		Profiles:       profiles,
 		Grants:         grants,
 		Pending:        pending,
 	}, nil
+}
+
+func (g *Guardian) changeProfile(profile string) {
+	if profile == "" {
+		return
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if _, ok := g.profiles[profile]; !ok {
+		return
+	}
+
+	g.cfg.Profile = profile
 }
 
 func (g *Guardian) RecentDecisions() []DecisionRecord {
@@ -261,8 +285,10 @@ func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision 
 }
 
 func (g *Guardian) policyDecisionForActionTypes(req sdk.GuardianRequest, actionTypes []string) sdk.GuardianDecision {
+	g.mu.Lock()
 	profileName := g.cfg.Profile
 	profile := g.profiles[profileName]
+	g.mu.Unlock()
 
 	actionType := ""
 	rule := policyRule{
@@ -670,7 +696,9 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 		request.Metadata = make(map[string]any)
 	}
 	request.Metadata[actionTypeMetadataKey] = decision.Metadata[actionTypeMetadataKey]
+	g.mu.Lock()
 	request.Metadata[profileMetadataKey] = g.cfg.Profile
+	g.mu.Unlock()
 
 	grant := sdk.GuardianGrant{
 		ID:         g.nextIdentifier("grant"),

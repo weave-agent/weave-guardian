@@ -118,6 +118,38 @@ func TestSubscribePublishesGuardianRegistered(t *testing.T) {
 	assert.Same(t, g, payload)
 }
 
+func TestSubscribeHandlesGuardianProfileChange(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+
+	err := g.Subscribe(bus)
+	require.NoError(t, err)
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianProfileChangeTopic, sdk.GuardianProfileChange{
+		CurrentProfile: "auto",
+	}))
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "auto", snapshot.CurrentProfile)
+}
+
+func TestSubscribeIgnoresUnknownGuardianProfileChange(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+
+	err := g.Subscribe(bus)
+	require.NoError(t, err)
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianProfileChangeTopic, sdk.GuardianProfileChange{
+		CurrentProfile: "missing",
+	}))
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "ask", snapshot.CurrentProfile)
+}
+
 func TestBuiltInProfilePolicies(t *testing.T) {
 	tests := []struct {
 		name       string
