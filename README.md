@@ -78,7 +78,9 @@ Guardian classifies SDK requests into action types such as:
 - Secrets and policy: `secret.read`, `secret.exfiltrate`, `policy.read`, `policy.write`
 - System and fallback: `system.process_signal`, `system.service_change`, `unknown`
 
-Shell commands are tokenized with quote-aware parsing, shell wrappers such as `bash -c` are unwrapped, and compound commands are decomposed so Guardian can aggregate the riskiest stage. The aggregate order is `block > ask > allow`.
+Shell commands are validated with an AST-backed shell parser, tokenized with quote-aware parsing, shell wrappers such as `bash -c` are unwrapped, and compound commands are decomposed so Guardian can aggregate the riskiest stage. The aggregate order is `block > ask > allow`.
+
+Exec decisions include `metadata.action_type` for the selected policy action. They may also include `metadata.stage_action_types` and `metadata.composition_action_type` to explain multi-stage command escalation such as `network.read | shell` becoming `command.exec_remote`.
 
 ## Approvals and Grants
 
