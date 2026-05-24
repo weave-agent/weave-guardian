@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -34,12 +36,18 @@ type shellRedirect struct {
 	Target   string
 }
 
+type execClassification struct {
+	ActionTypes           []string
+	StageActionTypes      []string
+	CompositionActionType string
+}
+
 func classifyExecCommand(command string) string {
 	return classifyExecCommandInWorkingDir(command, "")
 }
 
 func classifyExecCommandInWorkingDir(command, workingDir string) string {
-	actions := classifyExecCommandActionsInWorkingDir(command, workingDir)
+	actions := classifyExecCommandClassificationInWorkingDir(command, workingDir).ActionTypes
 	if len(actions) == 0 {
 		return actionCommandExecLocal
 	}
@@ -54,24 +62,39 @@ func classifyExecCommandInWorkingDir(command, workingDir string) string {
 }
 
 func classifyExecCommandActionsInWorkingDir(command, workingDir string) []string {
+	return classifyExecCommandClassificationInWorkingDir(command, workingDir).ActionTypes
+}
+
+func classifyExecCommandClassificationInWorkingDir(command, workingDir string) execClassification {
 	parsed := decomposeShellCommand(command)
 	if len(parsed.Issues) > 0 {
-		return []string{actionCommandObfuscated}
+		return execClassification{
+			ActionTypes:      []string{actionCommandObfuscated},
+			StageActionTypes: []string{actionCommandObfuscated},
+		}
 	}
 
 	if len(parsed.Stages) == 0 {
-		return []string{actionCommandExecLocal}
+		return execClassification{
+			ActionTypes:      []string{actionCommandExecLocal},
+			StageActionTypes: []string{actionCommandExecLocal},
+		}
 	}
 
 	stageActions := make([]string, 0, len(parsed.Stages)+1)
 	for _, stage := range parsed.Stages {
 		stageActions = append(stageActions, classifyShellStage(stage, workingDir))
 	}
+	classification := execClassification{
+		ActionTypes:      append([]string(nil), stageActions...),
+		StageActionTypes: append([]string(nil), stageActions...),
+	}
 	if compositionAction := detectCompositionAction(parsed.Stages, stageActions, workingDir); compositionAction != "" {
-		stageActions = append(stageActions, compositionAction)
+		classification.ActionTypes = append(classification.ActionTypes, compositionAction)
+		classification.CompositionActionType = compositionAction
 	}
 
-	return stageActions
+	return classification
 }
 
 func classifyShellStage(stage shellStage, workingDir string) string {
@@ -105,6 +128,8 @@ func classifyShellStageBase(stage shellStage, workingDir string) string { //noli
 	switch name {
 	case "git":
 		return classifyGitCommand(args)
+	case "gh":
+		return classifyGitHubCommand(args)
 	case "rm", "rmdir", "unlink":
 		if isDangerousDelete(args) {
 			return actionCommandDangerousDelete
@@ -127,10 +152,20 @@ func classifyShellStageBase(stage shellStage, workingDir string) string { //noli
 		}
 		return actionCommandRead
 	case "find":
+		if findDangerousDelete(args) {
+			return actionCommandDangerousDelete
+		}
 		if findMutates(args) {
 			return actionCommandWrite
 		}
 		return actionCommandRead
+	case "dd", "truncate", "shred":
+		if actionType, ok := classifyShellPathAction(shellWritePathArgs(name, args), actionCommandWrite, workingDir); ok {
+			return actionType
+		}
+		return actionCommandWrite
+	case "rsync":
+		return classifyRsyncCommand(args, workingDir)
 	case "grep", "rg", "cat", "ls", "pwd", "wc", "head", "tail", "stat":
 		if stageReadsSensitivePath(name, args, workingDir) {
 			return actionSecretRead
@@ -139,8 +174,16 @@ func classifyShellStageBase(stage shellStage, workingDir string) string { //noli
 			return actionType
 		}
 		return actionCommandRead
+	case "env", "printenv":
+		return classifyEnvironmentRead(args)
+	case "security", "op", "pass":
+		return classifyCredentialCommand(name, args)
+	case "aws", "gcloud", "kubectl":
+		return classifyCloudCredentialOrNetworkCommand(name, args)
 	case commandCurl, commandWget:
 		return classifyNetworkCommand(name, args, workingDir)
+	case "nc", "netcat", "socat", "ftp", "sftp", "ssh", "scp":
+		return classifyNetworkToolCommand(name, args)
 	case "http", "https":
 		return classifyHTTPieCommand(args)
 	case "npm", "pnpm", "yarn", "bun":
@@ -151,6 +194,10 @@ func classifyShellStageBase(stage shellStage, workingDir string) string { //noli
 		return classifyCargoCommand(args)
 	case "python", "python3", "py":
 		return classifyPythonCommand(args)
+	case "node", "deno":
+		return classifyNodeCommand(args)
+	case "perl", "ruby", "php":
+		return classifyInterpreterCommand(args)
 	case "uv":
 		return classifyUVCommand(args)
 	case "pip", "pip3":
@@ -161,6 +208,8 @@ func classifyShellStageBase(stage shellStage, workingDir string) string { //noli
 		return actionSystemSignal
 	case "systemctl", "service", "launchctl":
 		return actionSystemService
+	case "source", ".":
+		return classifySourceCommand(args, workingDir)
 	case "get", "options":
 		return actionNetworkRead
 	case "post", "put", "patch", "delete":
@@ -281,7 +330,7 @@ func isExecutionSink(stage shellStage) bool {
 		return false
 	}
 	switch normalizedCommandName(stage.Tokens[0]) {
-	case "bash", "sh", "zsh", "fish", "python", "python3", "py", "perl", "ruby", "node", "deno", "php":
+	case "bash", "sh", "zsh", "fish", "python", "python3", "py", "perl", "ruby", "node", "deno", "php", "source", ".":
 		return true
 	default:
 		return false
@@ -310,6 +359,9 @@ func stageReadsSensitivePath(command string, args []string, workingDir string) b
 			}
 		}
 	case "grep", "rg":
+		if len(args) == 0 {
+			return false
+		}
 		for _, arg := range args[1:] {
 			if isShellFileArg(arg) && isSensitiveShellPath(arg, workingDir) {
 				return true
@@ -357,7 +409,12 @@ func classifyGitCommand(args []string) string { //nolint:gocyclo // Git subcomma
 			return actionGitDiscard
 		}
 		return actionGitWrite
-	case "restore", "clean":
+	case "restore":
+		return actionGitDiscard
+	case "clean":
+		if hasShortFlag(subArgs, "x") && (hasShortFlag(subArgs, "f") || hasLongFlag(subArgs, "force")) {
+			return actionCommandDangerousDelete
+		}
 		return actionGitDiscard
 	case "reset":
 		if hasAnyArg(subArgs, "--hard", "--merge", "--keep") {
@@ -374,6 +431,42 @@ func classifyGitCommand(args []string) string { //nolint:gocyclo // Git subcomma
 		return actionGitRead
 	default:
 		return actionGitWrite
+	}
+}
+
+func classifyGitHubCommand(args []string) string {
+	if len(args) == 0 {
+		return actionCommandExecLocal
+	}
+	command := strings.ToLower(args[0])
+	rest := args[1:]
+	switch command {
+	case "auth":
+		if len(rest) > 0 && strings.EqualFold(rest[0], "token") {
+			return actionSecretRead
+		}
+		return actionCommandRead
+	case "api":
+		for i, arg := range rest {
+			lower := strings.ToLower(arg)
+			if lower == "-x" || lower == "--method" {
+				if i+1 < len(rest) && isWriteHTTPMethod(rest[i+1]) {
+					return actionNetworkWrite
+				}
+			}
+			if strings.HasPrefix(lower, "-x") && len(arg) > 2 && isWriteHTTPMethod(arg[2:]) {
+				return actionNetworkWrite
+			}
+			if strings.HasPrefix(lower, "--method=") && isWriteHTTPMethod(arg[len("--method="):]) {
+				return actionNetworkWrite
+			}
+			if isNetworkBodyFlag(lower) {
+				return actionNetworkWrite
+			}
+		}
+		return actionNetworkRead
+	default:
+		return actionCommandExecLocal
 	}
 }
 
@@ -550,6 +643,9 @@ func classifyCargoCommand(args []string) string {
 }
 
 func classifyPythonCommand(args []string) string {
+	if interpreterInlineCode(args) {
+		return actionPackageScript
+	}
 	module, moduleArgs, ok := pythonModule(args)
 	if !ok {
 		return actionPackageScript
@@ -564,6 +660,133 @@ func classifyPythonCommand(args []string) string {
 	default:
 		return actionPackageScript
 	}
+}
+
+func classifyNodeCommand(args []string) string {
+	if interpreterInlineCode(args) {
+		return actionPackageScript
+	}
+	return actionPackageScript
+}
+
+func classifyInterpreterCommand(args []string) string {
+	if interpreterInlineCode(args) {
+		return actionPackageScript
+	}
+	return actionPackageScript
+}
+
+func interpreterInlineCode(args []string) bool {
+	return hasAnyArg(args, "-c", "-e") || hasShortFlag(args, "c") || hasShortFlag(args, "e")
+}
+
+func classifyEnvironmentRead(args []string) string {
+	if len(args) == 0 {
+		return actionSecretRead
+	}
+	for _, arg := range args {
+		upper := strings.ToUpper(arg)
+		if strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") ||
+			strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "KEY") ||
+			strings.Contains(upper, "CREDENTIAL") {
+			return actionSecretRead
+		}
+	}
+	return actionCommandRead
+}
+
+func classifyCredentialCommand(name string, args []string) string {
+	switch name {
+	case "security":
+		if len(args) > 0 && strings.HasPrefix(strings.ToLower(args[0]), "find-") {
+			return actionSecretRead
+		}
+	case "op", "pass":
+		return actionSecretRead
+	}
+	return actionCommandExecLocal
+}
+
+func classifyCloudCredentialOrNetworkCommand(name string, args []string) string {
+	lowerArgs := make([]string, len(args))
+	for i, arg := range args {
+		lowerArgs[i] = strings.ToLower(arg)
+	}
+	switch name {
+	case "aws":
+		if len(lowerArgs) >= 3 && lowerArgs[0] == "configure" && lowerArgs[1] == "get" {
+			return actionSecretRead
+		}
+		if len(lowerArgs) >= 2 && lowerArgs[0] == "s3" && slices.Contains([]string{"cp", "mv", "sync"}, lowerArgs[1]) {
+			if cloudCopyWritesRemote(args[2:]) {
+				return actionNetworkWrite
+			}
+			return actionNetworkRead
+		}
+	case "gcloud":
+		if slices.Contains(lowerArgs, "auth") || slices.Contains(lowerArgs, "credentials") {
+			return actionSecretRead
+		}
+		if len(lowerArgs) >= 3 && lowerArgs[0] == "storage" && slices.Contains([]string{"cp", "rsync"}, lowerArgs[1]) {
+			if cloudCopyWritesRemote(args[2:]) {
+				return actionNetworkWrite
+			}
+			return actionNetworkRead
+		}
+	case "kubectl":
+		if len(lowerArgs) >= 3 && lowerArgs[0] == "config" && lowerArgs[1] == "view" && slices.Contains(lowerArgs, "--raw") {
+			return actionSecretRead
+		}
+	}
+	return actionCommandExecLocal
+}
+
+func cloudCopyWritesRemote(args []string) bool {
+	paths := shellPathArgs(args)
+	if len(paths) == 0 {
+		return false
+	}
+	dst := paths[len(paths)-1]
+	return strings.Contains(dst, "://") || strings.HasPrefix(dst, "s3://") || strings.HasPrefix(dst, "gs://")
+}
+
+func classifyNetworkToolCommand(name string, args []string) string {
+	switch name {
+	case "ssh", "sftp":
+		return actionNetworkWrite
+	case "scp":
+		if len(shellPathArgs(args)) >= 2 {
+			return actionNetworkWrite
+		}
+		return actionNetworkRead
+	default:
+		return actionNetworkWrite
+	}
+}
+
+func classifyRsyncCommand(args []string, workingDir string) string {
+	if hasLongFlag(args, "delete") {
+		return actionCommandDangerousDelete
+	}
+	if actionType, ok := classifyShellPathAction(shellWritePathArgs("rsync", args), actionCommandWrite, workingDir); ok && actionType != actionCommandWrite {
+		return actionType
+	}
+	for _, arg := range shellPathArgs(args) {
+		if strings.Contains(arg, ":") && !strings.HasPrefix(arg, "./") && !strings.HasPrefix(arg, "../") {
+			return actionNetworkWrite
+		}
+	}
+	return actionCommandWrite
+}
+
+func classifySourceCommand(args []string, workingDir string) string {
+	if len(args) == 0 {
+		return actionCommandExecLocal
+	}
+	if isSensitiveShellPath(args[0], workingDir) {
+		return actionSecretRead
+	}
+	return actionCommandExecLocal
 }
 
 func classifyUVCommand(args []string) string {
@@ -773,6 +996,13 @@ func shellWritePathArgs(command string, args []string) []string {
 			return nil
 		}
 		return paths[len(paths)-1:]
+	case "dd":
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "of=") {
+				return []string{strings.TrimPrefix(arg, "of=")}
+			}
+		}
+		return nil
 	default:
 		return paths
 	}
@@ -839,6 +1069,21 @@ func findMutates(args []string) bool {
 			return true
 		case "-ok", "-okdir":
 			return true
+		}
+	}
+	return false
+}
+
+func findDangerousDelete(args []string) bool {
+	for i, arg := range args {
+		if arg == "-delete" {
+			return true
+		}
+		if (arg == "-exec" || arg == "-execdir") && i+1 < len(args) {
+			name := normalizedCommandName(args[i+1])
+			if name == "rm" || name == "rmdir" || name == "unlink" {
+				return true
+			}
 		}
 	}
 	return false
@@ -1027,6 +1272,7 @@ func isWriteHTTPMethod(method string) bool {
 
 func decomposeShellCommand(command string) shellCommand {
 	parsed := shellCommand{}
+	parsed.Issues = append(parsed.Issues, shellASTIssues(command)...)
 	tokens, issues := tokenizeShell(command)
 	parsed.Issues = append(parsed.Issues, issues...)
 	if len(tokens) == 0 {
@@ -1042,6 +1288,34 @@ func decomposeShellCommand(command string) shellCommand {
 	}
 
 	return parsed
+}
+
+func shellASTIssues(command string) []string {
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	file, err := parser.Parse(strings.NewReader(command), "")
+	if err != nil {
+		return []string{shellUnsupportedSyntaxID + ": " + err.Error()}
+	}
+
+	var issues []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.CmdSubst:
+			issues = append(issues, shellUnsupportedSyntaxID+": command substitution")
+		case *syntax.ProcSubst:
+			issues = append(issues, shellUnsupportedSyntaxID+": process substitution")
+		case *syntax.ArithmExp:
+			issues = append(issues, shellUnsupportedSyntaxID+": arithmetic expansion")
+		case *syntax.BraceExp:
+			issues = append(issues, shellUnsupportedSyntaxID+": brace expansion")
+		case *syntax.Redirect:
+			if n.Hdoc != nil {
+				issues = append(issues, shellUnsupportedSyntaxID+": here document")
+			}
+		}
+		return len(issues) == 0
+	})
+	return issues
 }
 
 func tokenizeShell(command string) ([]string, []string) {

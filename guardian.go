@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +24,18 @@ const (
 
 	actionTypeMetadataKey = "action_type"
 	profileMetadataKey    = "profile"
+	stageActionTypesKey   = "stage_action_types"
+	compositionActionKey  = "composition_action_type"
+
+	grantConstraintsVersionKey = "grant_constraints_version"
+	grantConstraintsVersion    = "v1"
+	grantActionTypeKey         = "grant_action_type"
+	grantProfileKey            = "grant_profile"
+	grantWorkingDirKey         = "grant_working_dir"
+	grantPathPrefixKey         = "grant_path_prefix"
+	grantPathExactKey          = "grant_path_exact"
+	grantCommandFamilyKey      = "grant_command_family"
+	grantNetworkHostKey        = "grant_network_host"
 )
 
 // Config holds guardian extension settings.
@@ -147,7 +162,7 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 		return decision, nil
 	}
 
-	if grant, ok := g.matchingGrant(decision); ok {
+	if grant, ok := g.matchingGrant(req, decision); ok {
 		decision.Action = sdk.GuardianDecisionAllow
 		decision.Reason = fmt.Sprintf("allowed by %s grant", grant.Scope)
 		decision.MatchedGrantID = grant.ID
@@ -281,10 +296,15 @@ type pendingApproval struct {
 }
 
 func (g *Guardian) policyDecision(req sdk.GuardianRequest) sdk.GuardianDecision {
-	return g.policyDecisionForActionTypes(req, requestActionTypes(req))
+	classification := requestActionClassification(req)
+	return g.policyDecisionForActionTypesWithClassification(req, classification.ActionTypes, classification)
 }
 
 func (g *Guardian) policyDecisionForActionTypes(req sdk.GuardianRequest, actionTypes []string) sdk.GuardianDecision {
+	return g.policyDecisionForActionTypesWithClassification(req, actionTypes, execClassification{})
+}
+
+func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.GuardianRequest, actionTypes []string, classification execClassification) sdk.GuardianDecision {
 	g.mu.Lock()
 	profileName := g.cfg.Profile
 	profile := g.profiles[profileName]
@@ -317,15 +337,25 @@ func (g *Guardian) policyDecisionForActionTypes(req sdk.GuardianRequest, actionT
 		}
 	}
 
+	metadata := map[string]any{
+		actionTypeMetadataKey: actionType,
+	}
+	if req.Action == sdk.GuardianActionExec {
+		if len(classification.StageActionTypes) > 0 {
+			metadata[stageActionTypesKey] = append([]string(nil), classification.StageActionTypes...)
+		}
+		if classification.CompositionActionType != "" {
+			metadata[compositionActionKey] = classification.CompositionActionType
+		}
+	}
+
 	return sdk.GuardianDecision{
 		ID:        req.ID,
 		RequestID: req.ID,
 		Action:    rule.decision,
 		Reason:    rule.reason,
 		Profile:   profileName,
-		Metadata: map[string]any{
-			actionTypeMetadataKey: actionType,
-		},
+		Metadata:  metadata,
 	}
 }
 
@@ -654,11 +684,12 @@ func (g *Guardian) waitForResolution(ctx context.Context, pending *pendingApprov
 	}
 }
 
-func (g *Guardian) matchingGrant(decision sdk.GuardianDecision) (sdk.GuardianGrant, bool) {
+func (g *Guardian) matchingGrant(req sdk.GuardianRequest, decision sdk.GuardianDecision) (sdk.GuardianGrant, bool) {
 	actionType, _ := decision.Metadata[actionTypeMetadataKey].(string)
 	if actionType == "" {
 		return sdk.GuardianGrant{}, false
 	}
+	requestConstraints := grantConstraintsForRequest(req, decision, false)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -671,11 +702,11 @@ func (g *Guardian) matchingGrant(decision sdk.GuardianDecision) (sdk.GuardianGra
 			continue
 		}
 		if grant.Scope == sdk.GuardianGrantScopeProfile {
-			if grantProfile, _ := grant.Request.Metadata[profileMetadataKey].(string); grantProfile != decision.Profile {
+			if grantProfile(grant.Request) != decision.Profile {
 				continue
 			}
 		}
-		if grantActionType(grant.Request) == actionType {
+		if grantMatchesRequest(grant.Request, actionType, requestConstraints) {
 			return grant, true
 		}
 	}
@@ -699,6 +730,9 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	g.mu.Lock()
 	request.Metadata[profileMetadataKey] = g.cfg.Profile
 	g.mu.Unlock()
+	for key, value := range grantConstraintsForRequest(request, decision, true) {
+		request.Metadata[key] = value
+	}
 
 	grant := sdk.GuardianGrant{
 		ID:         g.nextIdentifier("grant"),
@@ -711,6 +745,227 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	g.mu.Lock()
 	g.grants = append(g.grants, grant)
 	g.mu.Unlock()
+}
+
+func grantConstraintsForRequest(req sdk.GuardianRequest, decision sdk.GuardianDecision, persist bool) map[string]any {
+	actionType, _ := decision.Metadata[actionTypeMetadataKey].(string)
+	constraints := make(map[string]any)
+	if persist {
+		constraints[grantConstraintsVersionKey] = grantConstraintsVersion
+		constraints[grantActionTypeKey] = actionType
+		constraints[grantProfileKey] = decision.Profile
+	}
+
+	if req.WorkingDir != "" {
+		constraints[grantWorkingDirKey] = normalizeGrantWorkingDir(req.WorkingDir)
+	}
+
+	switch req.Action {
+	case sdk.GuardianActionRead, sdk.GuardianActionWrite, sdk.GuardianActionDelete:
+		addFileGrantPathConstraint(constraints, actionType, req.Path, req.WorkingDir)
+	case sdk.GuardianActionExec:
+		addExecGrantConstraints(constraints, req, actionType)
+	case sdk.GuardianActionNetwork:
+		if host := requestNetworkHost(req); host != "" {
+			constraints[grantNetworkHostKey] = host
+		}
+	}
+
+	return constraints
+}
+
+func grantMatchesRequest(grantReq sdk.GuardianRequest, actionType string, requestConstraints map[string]any) bool {
+	grantMetadata := grantReq.Metadata
+	if grantActionType(grantReq) != actionType {
+		return false
+	}
+	if metadataString(grantMetadata, grantConstraintsVersionKey) == "" {
+		return true
+	}
+	if metadataString(grantMetadata, grantConstraintsVersionKey) != grantConstraintsVersion {
+		return false
+	}
+
+	if !constraintStringMatches(grantMetadata, requestConstraints, grantWorkingDirKey) {
+		return false
+	}
+	if !constraintStringMatches(grantMetadata, requestConstraints, grantCommandFamilyKey) {
+		return false
+	}
+	if !constraintStringMatches(grantMetadata, requestConstraints, grantNetworkHostKey) {
+		return false
+	}
+	if exact := metadataString(grantMetadata, grantPathExactKey); exact != "" && metadataString(requestConstraints, grantPathExactKey) != exact {
+		return false
+	}
+	if prefix := metadataString(grantMetadata, grantPathPrefixKey); prefix != "" {
+		requestPath := metadataString(requestConstraints, grantPathExactKey, grantPathPrefixKey)
+		if !pathHasGrantPrefix(requestPath, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func constraintStringMatches(grantMetadata, requestConstraints map[string]any, key string) bool {
+	grantValue := metadataString(grantMetadata, key)
+	if grantValue == "" {
+		return true
+	}
+	return metadataString(requestConstraints, key) == grantValue
+}
+
+func addFileGrantPathConstraint(constraints map[string]any, actionType, rawPath, workingDir string) {
+	if rawPath == "" {
+		return
+	}
+	normalized := normalizeRequestPath(rawPath, workingDir).resolved
+	if normalized == "" {
+		return
+	}
+	switch actionType {
+	case actionFileRead, actionFileWrite:
+		constraints[grantPathPrefixKey] = filepath.Dir(normalized)
+	case actionFileDelete, actionSecretRead:
+		constraints[grantPathExactKey] = normalized
+	}
+}
+
+func addExecGrantConstraints(constraints map[string]any, req sdk.GuardianRequest, actionType string) {
+	stage, ok := selectedShellStage(req.Command, req.WorkingDir, actionType)
+	if !ok {
+		return
+	}
+	if len(stage.Tokens) > 0 {
+		constraints[grantCommandFamilyKey] = normalizedCommandName(stage.Tokens[0])
+	}
+	if actionType == actionNetworkRead || actionType == actionNetworkWrite {
+		if host := shellStageNetworkHost(stage); host != "" {
+			constraints[grantNetworkHostKey] = host
+		}
+	}
+	if path := shellStageConstraintPath(stage, req.WorkingDir, actionType); path != "" {
+		switch actionType {
+		case actionSecretRead, actionFileDelete:
+			constraints[grantPathExactKey] = path
+		default:
+			constraints[grantPathPrefixKey] = filepath.Dir(path)
+		}
+	}
+}
+
+func selectedShellStage(command, workingDir, actionType string) (shellStage, bool) {
+	parsed := decomposeShellCommand(command)
+	if len(parsed.Issues) > 0 || len(parsed.Stages) == 0 {
+		return shellStage{}, false
+	}
+	for _, stage := range parsed.Stages {
+		if classifyShellStage(stage, workingDir) == actionType {
+			return stage, true
+		}
+	}
+	return shellStage{}, false
+}
+
+func shellStageConstraintPath(stage shellStage, workingDir, actionType string) string {
+	for _, redirect := range stage.Redirects {
+		if redirect.Target == "" {
+			continue
+		}
+		if strings.Contains(redirect.Operator, "<") && (actionType == actionSecretRead || actionType == actionCommandRead) {
+			return normalizeRequestPath(redirect.Target, workingDir).resolved
+		}
+		if strings.Contains(redirect.Operator, ">") {
+			return normalizeRequestPath(redirect.Target, workingDir).resolved
+		}
+	}
+	if len(stage.Tokens) == 0 {
+		return ""
+	}
+	name := normalizedCommandName(stage.Tokens[0])
+	args := stage.Tokens[1:]
+	var paths []string
+	switch name {
+	case "rm", "rmdir", "unlink", "sed", "grep", "rg", "cat", "ls", "wc", "head", "tail", "stat", "source", ".":
+		paths = shellPathArgs(args)
+	case "mv", "cp", "mkdir", "touch", "tee", "dd", "truncate", "shred", "rsync":
+		paths = shellWritePathArgs(name, args)
+	case commandCurl, commandWget:
+		for i := range args {
+			output, ok := networkOutputTarget(name, strings.ToLower(args[i]), args, i)
+			if ok && output != "" && !isStdoutTarget(output) {
+				paths = []string{output}
+				break
+			}
+		}
+	}
+	for _, path := range paths {
+		if isShellFileArg(path) {
+			return normalizeRequestPath(path, workingDir).resolved
+		}
+	}
+	return ""
+}
+
+func shellStageNetworkHost(stage shellStage) string {
+	for _, token := range stage.Tokens {
+		if host := urlHost(token); host != "" {
+			return host
+		}
+	}
+	return ""
+}
+
+func requestNetworkHost(req sdk.GuardianRequest) string {
+	for _, key := range []string{"host", "url", "uri", "endpoint", "target", "http.host"} {
+		if host := urlHost(metadataString(req.Metadata, key)); host != "" {
+			return host
+		}
+	}
+	return ""
+}
+
+func urlHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		parsed, err := url.Parse(raw)
+		if err == nil && parsed.Hostname() != "" {
+			return strings.ToLower(parsed.Hostname())
+		}
+		return ""
+	}
+	if strings.Contains(raw, ".") && strings.ContainsFunc(raw, func(r rune) bool {
+		return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+	}) && !strings.ContainsAny(raw, "/\\") && !strings.HasPrefix(raw, ".") {
+		host, _, ok := strings.Cut(raw, ":")
+		if ok {
+			raw = host
+		}
+		return strings.ToLower(raw)
+	}
+	return ""
+}
+
+func normalizeGrantWorkingDir(workingDir string) string {
+	if workingDir == "" {
+		return ""
+	}
+	return normalizeRequestPath(".", workingDir).resolved
+}
+
+func pathHasGrantPrefix(path, prefix string) bool {
+	if path == "" || prefix == "" {
+		return false
+	}
+	cleanPath := filepath.Clean(path)
+	cleanPrefix := filepath.Clean(prefix)
+	if cleanPath == cleanPrefix {
+		return true
+	}
+	return strings.HasPrefix(cleanPath, strings.TrimRight(cleanPrefix, string(filepath.Separator))+string(filepath.Separator))
 }
 
 func (g *Guardian) clearGrants(payload any) {
@@ -758,11 +1013,19 @@ func resolutionReason(resolution sdk.GuardianResolution, fallback string) string
 }
 
 func requestActionTypes(req sdk.GuardianRequest) []string {
+	return requestActionClassification(req).ActionTypes
+}
+
+func requestActionClassification(req sdk.GuardianRequest) execClassification {
 	if req.Action == sdk.GuardianActionExec {
-		return classifyExecCommandActionsInWorkingDir(req.Command, req.WorkingDir)
+		return classifyExecCommandClassificationInWorkingDir(req.Command, req.WorkingDir)
 	}
 
-	return []string{classifyRequest(req)}
+	actionType := classifyRequest(req)
+	return execClassification{
+		ActionTypes:      []string{actionType},
+		StageActionTypes: []string{actionType},
+	}
 }
 
 func metadataActionType(metadata map[string]any) (string, bool) {
@@ -815,6 +1078,11 @@ func cloneSDKProfiles(profiles map[string]sdk.GuardianProfile) map[string]sdk.Gu
 
 func grantActionType(req sdk.GuardianRequest) string {
 	if req.Metadata != nil {
+		if raw, ok := req.Metadata[grantActionTypeKey]; ok {
+			if actionType, ok := raw.(string); ok && actionType != "" {
+				return actionType
+			}
+		}
 		if raw, ok := req.Metadata[actionTypeMetadataKey]; ok {
 			if actionType, ok := raw.(string); ok && actionType != "" {
 				return actionType
@@ -823,6 +1091,16 @@ func grantActionType(req sdk.GuardianRequest) string {
 	}
 
 	return requestActionType(req)
+}
+
+func grantProfile(req sdk.GuardianRequest) string {
+	if req.Metadata == nil {
+		return ""
+	}
+	if profile := metadataString(req.Metadata, grantProfileKey); profile != "" {
+		return profile
+	}
+	return metadataString(req.Metadata, profileMetadataKey)
 }
 
 func hardBlockReasons() map[string]string {

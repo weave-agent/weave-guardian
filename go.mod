@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/stretchr/testify v1.11.1
 	github.com/weave-agent/weave v0.0.8
+	mvdan.cc/sh/v3 v3.13.1
 )
 
 require (
