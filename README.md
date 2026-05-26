@@ -8,11 +8,11 @@ The extension registers under the `guardian` config scope and publishes `guardia
 
 Guardian ships with three built-in profiles:
 
-- `ask`: allows routine read, test, and build actions; asks before mutating or risky actions; blocks hard-deny actions.
-- `auto`: allows common development actions such as project writes, local command execution, network reads, package installs, and package scripts; asks for higher-risk actions such as remote writes, history rewrites, secret reads, global installs, process signals, service changes, and unknown actions; blocks hard-deny actions.
-- `yolo`: allows all known and unknown actions except hard-deny actions.
+- `ask`: allows routine read, test, and build actions; asks before mutating or risky actions; blocks non-approvable hard-deny actions.
+- `auto`: allows common development actions such as project writes, local command execution, network reads, package installs, and package scripts; asks for higher-risk actions such as remote writes, history rewrites, secret reads, global installs, process signals, service changes, remote execution, obfuscated commands, dangerous deletes, and unknown actions; blocks non-approvable hard-deny actions.
+- `yolo`: allows all known and unknown actions.
 
-Hard-deny actions are always blocked before approval grants are considered. They include remote code execution, obfuscated command payloads, dangerous recursive deletes, protected path writes, policy tampering, and secret exfiltration.
+Non-approvable hard-deny actions are always blocked before approval grants are considered in `ask`, `auto`, and custom profiles. They include protected path writes, policy tampering, and secret exfiltration. Remote code execution, obfuscated command payloads, and dangerous recursive deletes require approval in `ask` and `auto`. `yolo` allows all actions.
 
 ## Configuration
 

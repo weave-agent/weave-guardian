@@ -317,7 +317,7 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 	for _, candidateType := range actionTypes {
 		candidateRule, ok := profile.rules[candidateType]
-		if hardRule, hard := hardBlockRule(candidateType); hard {
+		if hardRule, hard := profileHardBlockRule(profileName, candidateType); hard {
 			candidateRule = hardRule
 			ok = true
 		}
@@ -517,6 +517,10 @@ func builtInProfiles() map[string]policyProfile {
 		"unknown":                askRule("unknown actions require approval"),
 	}
 	for actionType, reason := range hardBlocks {
+		if canApproveHardCommand(actionType) {
+			askRules[actionType] = askRule(hardCommandApprovalReason(actionType, reason))
+			continue
+		}
 		askRules[actionType] = blockRule(reason)
 	}
 
@@ -539,7 +543,7 @@ func builtInProfiles() map[string]policyProfile {
 	}
 	yoloRules["unknown"] = allowRule("unknown actions are allowed by yolo profile")
 	for actionType, reason := range hardBlocks {
-		yoloRules[actionType] = blockRule(reason)
+		yoloRules[actionType] = allowRule(reason)
 	}
 
 	return map[string]policyProfile{
@@ -555,7 +559,7 @@ func builtInProfiles() map[string]policyProfile {
 		},
 		yoloProfile: {
 			name:        yoloProfile,
-			description: "Permissive profile that still enforces hard blocks",
+			description: "Permissive profile that allows all actions",
 			rules:       yoloRules,
 		},
 	}
@@ -1121,6 +1125,49 @@ func hardBlockRule(actionType string) (policyRule, bool) {
 	}
 
 	return blockRule(reason), true
+}
+
+func profileHardBlockRule(profileName, actionType string) (policyRule, bool) {
+	rule, ok := hardBlockRule(actionType)
+	if !ok {
+		return policyRule{}, false
+	}
+	if profileName == yoloProfile {
+		return allowRule(rule.reason), true
+	}
+	if profileCanApproveHardCommand(profileName, actionType) {
+		return askRule(hardCommandApprovalReason(actionType, rule.reason)), true
+	}
+	return rule, true
+}
+
+func profileCanApproveHardCommand(profileName, actionType string) bool {
+	if profileName != defaultProfile && profileName != autoProfile {
+		return false
+	}
+	return canApproveHardCommand(actionType)
+}
+
+func canApproveHardCommand(actionType string) bool {
+	switch actionType {
+	case actionCommandExecRemote, actionCommandObfuscated, actionCommandDangerousDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func hardCommandApprovalReason(actionType, fallback string) string {
+	switch actionType {
+	case actionCommandExecRemote:
+		return "remote code execution requires approval"
+	case actionCommandObfuscated:
+		return "obfuscated command payloads require approval"
+	case actionCommandDangerousDelete:
+		return "dangerous delete operations require approval"
+	default:
+		return fallback
+	}
 }
 
 func shouldUseDecision(candidateType string, candidateRule policyRule, currentType string, currentRule policyRule) bool {
