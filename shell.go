@@ -922,6 +922,9 @@ func classifyRedirectWrites(redirects []shellRedirect, workingDir string) (strin
 		if !strings.Contains(redirect.Operator, ">") {
 			continue
 		}
+		if redirect.Target == "" || isDiscardTarget(redirect.Target) {
+			continue
+		}
 		if actionType := classifyShellWritePath(redirect.Target, actionCommandWrite, workingDir); actionType != actionCommandWrite {
 			return actionType, true
 		}
@@ -1013,7 +1016,7 @@ func classifyNetworkOutputWrite(name string, args []string, workingDir string) (
 		arg := args[i]
 		lower := strings.ToLower(arg)
 		if output, ok := networkOutputTarget(name, lower, args, i); ok {
-			if isStdoutTarget(output) {
+			if isStdoutTarget(output) || isDiscardTarget(output) {
 				return actionNetworkRead, true
 			}
 			if output == "" {
@@ -1032,6 +1035,10 @@ func isStdoutTarget(target string) bool {
 	default:
 		return false
 	}
+}
+
+func isDiscardTarget(target string) bool {
+	return target == "/dev/null" || strings.EqualFold(target, "nul")
 }
 
 func networkOutputTarget(name, arg string, args []string, index int) (string, bool) {
@@ -1301,7 +1308,9 @@ func shellASTIssues(command string) []string {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.CmdSubst:
-			issues = append(issues, shellUnsupportedSyntaxID+": command substitution")
+			if !isSafeCommandSubstitution(n) {
+				issues = append(issues, shellUnsupportedSyntaxID+": command substitution")
+			}
 		case *syntax.ProcSubst:
 			issues = append(issues, shellUnsupportedSyntaxID+": process substitution")
 		case *syntax.ArithmExp:
@@ -1316,6 +1325,36 @@ func shellASTIssues(command string) []string {
 		return len(issues) == 0
 	})
 	return issues
+}
+
+func isSafeCommandSubstitution(substitution *syntax.CmdSubst) bool {
+	if substitution.Backquotes || substitution.TempFile || substitution.ReplyVar || len(substitution.Stmts) != 1 {
+		return false
+	}
+
+	stmt := substitution.Stmts[0]
+	if stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown || len(stmt.Redirs) > 0 {
+		return false
+	}
+
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) != 1 {
+		return false
+	}
+
+	value, ok := literalWordValue(call.Args[0])
+	return ok && value == "pwd"
+}
+
+func literalWordValue(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return "", false
+	}
+	return lit.Value, true
 }
 
 func tokenizeShell(command string) ([]string, []string) {
@@ -1389,7 +1428,7 @@ func tokenizeShell(command string) ([]string, []string) {
 }
 
 func shellExpansionIssues(command string) []string {
-	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
+	if strings.Contains(command, "<(") || strings.Contains(command, ">(") {
 		return []string{shellUnsupportedSyntaxID + ": shell expansion"}
 	}
 	return nil

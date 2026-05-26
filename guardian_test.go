@@ -844,6 +844,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{
+			name:     "dev null redirect is local execution",
+			command:  "command -v golangci-lint >/dev/null && golangci-lint run || true",
+			wantType: actionCommandExecLocal,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
 			name:     "grep is read",
 			command:  "rg TODO .",
 			wantType: actionCommandRead,
@@ -1016,6 +1022,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			command:  "curl https://example.com > /etc/hosts",
 			wantType: actionFileProtected,
 			want:     sdk.GuardianDecisionBlock,
+		},
+		{
+			name:     "pwd command substitution in env value is local execution",
+			command:  "GOLANGCI_LINT_CACHE=$(pwd)/.cache/golangci-lint golangci-lint run",
+			wantType: actionCommandExecLocal,
+			want:     sdk.GuardianDecisionAsk,
 		},
 		{
 			name:     "command substitution is blocked as obfuscated",
