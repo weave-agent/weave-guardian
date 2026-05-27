@@ -10,6 +10,8 @@ import (
 	"github.com/weave-agent/weave/sdk"
 )
 
+const envFileName = ".env"
+
 const (
 	actionFileRead          = "file.read"
 	actionFileWrite         = "file.write"
@@ -176,7 +178,7 @@ func isSensitivePath(path classifiedPath) bool {
 	}
 
 	base := path.base
-	if base == ".env" || strings.HasPrefix(base, ".env.") || base == ".npmrc" || base == ".pypirc" || base == ".netrc" {
+	if base == envFileName || strings.HasPrefix(base, envFileName+".") || base == ".npmrc" || base == ".pypirc" || base == ".netrc" {
 		return true
 	}
 	if strings.HasPrefix(base, "id_") || strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
@@ -253,7 +255,7 @@ func isWindowsProtectedPath(resolved string) bool {
 }
 
 func isWeaveExtensionsPath(parts []string) bool {
-	for i := 0; i < len(parts)-1; i++ {
+	for i := range len(parts) - 1 {
 		if parts[i] == ".weave" && parts[i+1] == "extensions" {
 			return true
 		}

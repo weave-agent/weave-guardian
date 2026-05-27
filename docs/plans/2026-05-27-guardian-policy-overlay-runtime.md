@@ -92,12 +92,12 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify push/pop event handling is session-only and does not mutate config files
-- [ ] verify overlays do not create profiles and do not change current profile selection
-- [ ] verify both permissive and restrictive overlays work
-- [ ] verify hard-block override requires explicit `OverrideHardBlocks`
-- [ ] run `go test ./...`
-- [ ] run repository linter if configured
+- [x] verify push/pop event handling is session-only and does not mutate config files
+- [x] verify overlays do not create profiles and do not change current profile selection
+- [x] verify both permissive and restrictive overlays work
+- [x] verify hard-block override requires explicit `OverrideHardBlocks`
+- [x] run `go test ./...`
+- [x] run repository linter if configured
 
 ## Technical Details
 - Push by ID replaces the previous overlay with the same ID.

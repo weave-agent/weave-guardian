@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -514,8 +515,7 @@ func (g *Guardian) orderedPolicyOverlaysLocked() []policyOverlay {
 }
 
 func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
-	for i := len(overlays) - 1; i >= 0; i-- {
-		overlay := overlays[i]
+	for _, overlay := range slices.Backward(overlays) {
 		if overlay.overlay.OverrideHardBlocks != overrideHardBlocks {
 			continue
 		}
@@ -902,9 +902,7 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	g.mu.Lock()
 	request.Metadata[profileMetadataKey] = g.cfg.Profile
 	g.mu.Unlock()
-	for key, value := range grantConstraintsForRequest(request, decision, true) {
-		request.Metadata[key] = value
-	}
+	maps.Copy(request.Metadata, grantConstraintsForRequest(request, decision, true))
 
 	grant := sdk.GuardianGrant{
 		ID:         g.nextIdentifier("grant"),
@@ -941,6 +939,7 @@ func grantConstraintsForRequest(req sdk.GuardianRequest, decision sdk.GuardianDe
 		if host := requestNetworkHost(req); host != "" {
 			constraints[grantNetworkHostKey] = host
 		}
+	case sdk.GuardianActionUnknown:
 	}
 
 	return constraints
@@ -1258,17 +1257,14 @@ func cloneSDKProfiles(profiles map[string]sdk.GuardianProfile) map[string]sdk.Gu
 }
 
 func grantActionType(req sdk.GuardianRequest) string {
-	if req.Metadata != nil {
-		if raw, ok := req.Metadata[grantActionTypeKey]; ok {
-			if actionType, ok := raw.(string); ok && actionType != "" {
-				return actionType
-			}
-		}
-		if raw, ok := req.Metadata[actionTypeMetadataKey]; ok {
-			if actionType, ok := raw.(string); ok && actionType != "" {
-				return actionType
-			}
-		}
+	if req.Metadata == nil {
+		return requestActionType(req)
+	}
+	if actionType := metadataString(req.Metadata, grantActionTypeKey); actionType != "" {
+		return actionType
+	}
+	if actionType := metadataString(req.Metadata, actionTypeMetadataKey); actionType != "" {
+		return actionType
 	}
 
 	return requestActionType(req)

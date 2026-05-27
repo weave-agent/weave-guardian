@@ -61,10 +61,6 @@ func classifyExecCommandInWorkingDir(command, workingDir string) string {
 	return actionType
 }
 
-func classifyExecCommandActionsInWorkingDir(command, workingDir string) []string {
-	return classifyExecCommandClassificationInWorkingDir(command, workingDir).ActionTypes
-}
-
 func classifyExecCommandClassificationInWorkingDir(command, workingDir string) execClassification {
 	parsed := decomposeShellCommand(command)
 	if len(parsed.Issues) > 0 {
@@ -714,31 +710,42 @@ func classifyCloudCredentialOrNetworkCommand(name string, args []string) string 
 	}
 	switch name {
 	case "aws":
-		if len(lowerArgs) >= 3 && lowerArgs[0] == "configure" && lowerArgs[1] == "get" {
-			return actionSecretRead
-		}
-		if len(lowerArgs) >= 2 && lowerArgs[0] == "s3" && slices.Contains([]string{"cp", "mv", "sync"}, lowerArgs[1]) {
-			if cloudCopyWritesRemote(args[2:]) {
-				return actionNetworkWrite
-			}
-			return actionNetworkRead
-		}
+		return classifyAWSCommand(args, lowerArgs)
 	case "gcloud":
-		if slices.Contains(lowerArgs, "auth") || slices.Contains(lowerArgs, "credentials") {
-			return actionSecretRead
-		}
-		if len(lowerArgs) >= 3 && lowerArgs[0] == "storage" && slices.Contains([]string{"cp", "rsync"}, lowerArgs[1]) {
-			if cloudCopyWritesRemote(args[2:]) {
-				return actionNetworkWrite
-			}
-			return actionNetworkRead
-		}
+		return classifyGCloudCommand(args, lowerArgs)
 	case "kubectl":
 		if len(lowerArgs) >= 3 && lowerArgs[0] == "config" && lowerArgs[1] == "view" && slices.Contains(lowerArgs, "--raw") {
 			return actionSecretRead
 		}
 	}
 	return actionCommandExecLocal
+}
+
+func classifyAWSCommand(args, lowerArgs []string) string {
+	if len(lowerArgs) >= 3 && lowerArgs[0] == "configure" && lowerArgs[1] == "get" {
+		return actionSecretRead
+	}
+	if len(lowerArgs) >= 2 && lowerArgs[0] == "s3" && slices.Contains([]string{"cp", "mv", "sync"}, lowerArgs[1]) {
+		return classifyCloudCopy(args[2:])
+	}
+	return actionCommandExecLocal
+}
+
+func classifyGCloudCommand(args, lowerArgs []string) string {
+	if slices.Contains(lowerArgs, "auth") || slices.Contains(lowerArgs, "credentials") {
+		return actionSecretRead
+	}
+	if len(lowerArgs) >= 3 && lowerArgs[0] == "storage" && slices.Contains([]string{"cp", "rsync"}, lowerArgs[1]) {
+		return classifyCloudCopy(args[2:])
+	}
+	return actionCommandExecLocal
+}
+
+func classifyCloudCopy(args []string) string {
+	if cloudCopyWritesRemote(args) {
+		return actionNetworkWrite
+	}
+	return actionNetworkRead
 }
 
 func cloudCopyWritesRemote(args []string) bool {
@@ -1001,8 +1008,8 @@ func shellWritePathArgs(command string, args []string) []string {
 		return paths[len(paths)-1:]
 	case "dd":
 		for _, arg := range args {
-			if strings.HasPrefix(arg, "of=") {
-				return []string{strings.TrimPrefix(arg, "of=")}
+			if outputPath, ok := strings.CutPrefix(arg, "of="); ok {
+				return []string{outputPath}
 			}
 		}
 		return nil

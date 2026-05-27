@@ -266,6 +266,65 @@ func TestSubscribeIgnoresMalformedPolicyOverlayEvents(t *testing.T) {
 	assert.Zero(t, count)
 }
 
+func TestPolicyOverlaysAreSessionOnlyAndDoNotMutateProfiles(t *testing.T) {
+	cfg := Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{
+					profileRule(actionNetworkRead, sdk.GuardianDecisionAllow),
+				},
+			},
+		},
+	}
+	g := New(cfg)
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	before, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, before.Overlays)
+	require.Len(t, before.Profiles, 4)
+	assert.Equal(t, "team", before.CurrentProfile)
+	require.Contains(t, before.Profiles, "team")
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:     "session-overlay",
+		Source: "test-extension",
+		Rules:  []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+
+	afterPush, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, afterPush.Overlays, 1)
+	assert.Equal(t, "team", afterPush.CurrentProfile)
+	assert.Len(t, afterPush.Profiles, len(before.Profiles))
+	assert.Contains(t, afterPush.Profiles, "team")
+	assert.NotContains(t, afterPush.Profiles, "session-overlay")
+	g.mu.Lock()
+	assert.Equal(t, "team", g.cfg.Profile)
+	assert.Len(t, g.cfg.Profiles, 1)
+	g.mu.Unlock()
+
+	restarted := New(cfg)
+	restartedSnapshot, err := restarted.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, restartedSnapshot.Overlays)
+	assert.Equal(t, "team", restartedSnapshot.CurrentProfile)
+	assert.Len(t, restartedSnapshot.Profiles, len(before.Profiles))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{
+		ID: "session-overlay",
+	}))
+
+	afterPop, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, afterPop.Overlays)
+	assert.Equal(t, "team", afterPop.CurrentProfile)
+	assert.Len(t, afterPop.Profiles, len(before.Profiles))
+}
+
 func TestSnapshotIncludesAndRemovesPolicyOverlays(t *testing.T) {
 	g := New(Config{Profile: "ask"})
 	bus := newStubBus()
