@@ -726,7 +726,10 @@ func classifyAWSCommand(args, lowerArgs []string) string {
 		return actionSecretRead
 	}
 	if len(lowerArgs) >= 2 && lowerArgs[0] == "s3" && slices.Contains([]string{"cp", "mv", "sync"}, lowerArgs[1]) {
-		return classifyCloudCopy(args[2:])
+		if cloudCopyWritesRemote(args[2:]) {
+			return actionNetworkWrite
+		}
+		return actionNetworkRead
 	}
 	return actionCommandExecLocal
 }
@@ -736,16 +739,12 @@ func classifyGCloudCommand(args, lowerArgs []string) string {
 		return actionSecretRead
 	}
 	if len(lowerArgs) >= 3 && lowerArgs[0] == "storage" && slices.Contains([]string{"cp", "rsync"}, lowerArgs[1]) {
-		return classifyCloudCopy(args[2:])
+		if cloudCopyWritesRemote(args[2:]) {
+			return actionNetworkWrite
+		}
+		return actionNetworkRead
 	}
 	return actionCommandExecLocal
-}
-
-func classifyCloudCopy(args []string) string {
-	if cloudCopyWritesRemote(args) {
-		return actionNetworkWrite
-	}
-	return actionNetworkRead
 }
 
 func cloudCopyWritesRemote(args []string) bool {

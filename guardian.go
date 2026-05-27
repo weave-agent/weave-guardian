@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -82,13 +81,12 @@ type Guardian struct {
 	headless        bool
 	approvalTimeout time.Duration
 
-	mu           sync.Mutex
-	pending      map[string]*pendingApproval
-	grants       []sdk.GuardianGrant
-	history      []DecisionRecord
-	overlays     map[string]policyOverlay
-	overlayOrder []string
-	nextID       uint64
+	mu       sync.Mutex
+	pending  map[string]*pendingApproval
+	grants   []sdk.GuardianGrant
+	history  []DecisionRecord
+	overlays []policyOverlay
+	nextID   uint64
 }
 
 // DecisionRecord is the bounded audit trail Guardian keeps for recent
@@ -131,7 +129,6 @@ func newGuardian(cfg Config, headless bool) *Guardian {
 		headless:        headless,
 		approvalTimeout: approvalTimeout(cfg.ApprovalTimeout),
 		pending:         make(map[string]*pendingApproval),
-		overlays:        make(map[string]policyOverlay),
 	}
 }
 
@@ -296,13 +293,7 @@ func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	for _, approval := range g.pending {
 		pending = append(pending, cloneGuardianApproval(approval.approval))
 	}
-	overlays := make([]sdk.GuardianPolicyOverlay, 0, len(g.overlays))
-	for _, overlay := range g.overlays {
-		overlays = append(overlays, cloneGuardianPolicyOverlay(overlay.overlay))
-	}
-	sort.Slice(overlays, func(i, j int) bool {
-		return overlays[i].ID < overlays[j].ID
-	})
+	overlays := cloneGuardianPolicyOverlays(g.overlays)
 	profiles := cloneSDKProfiles(sdkProfiles(g.profiles))
 	g.mu.Unlock()
 
@@ -354,8 +345,7 @@ func (g *Guardian) pushPolicyOverlay(overlay sdk.GuardianPolicyOverlay) bool {
 
 	g.mu.Lock()
 	g.removePolicyOverlayLocked(overlay.ID)
-	g.overlays[overlay.ID] = compiled
-	g.overlayOrder = append(g.overlayOrder, overlay.ID)
+	g.overlays = append(g.overlays, compiled)
 	g.mu.Unlock()
 	return true
 }
@@ -366,19 +356,17 @@ func (g *Guardian) popPolicyOverlay(id string) bool {
 	}
 
 	g.mu.Lock()
-	_, ok := g.overlays[id]
-	if ok {
-		g.removePolicyOverlayLocked(id)
-	}
+	before := len(g.overlays)
+	g.removePolicyOverlayLocked(id)
+	ok := len(g.overlays) != before
 	g.mu.Unlock()
 	return ok
 }
 
 func (g *Guardian) removePolicyOverlayLocked(id string) {
-	delete(g.overlays, id)
-	for i, overlayID := range g.overlayOrder {
-		if overlayID == id {
-			g.overlayOrder = append(g.overlayOrder[:i], g.overlayOrder[i+1:]...)
+	for i, overlay := range g.overlays {
+		if overlay.overlay.ID == id {
+			g.overlays = append(g.overlays[:i], g.overlays[i+1:]...)
 			return
 		}
 	}
@@ -430,7 +418,7 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	g.mu.Lock()
 	profileName := g.cfg.Profile
 	profile := g.profiles[profileName]
-	overlays := g.orderedPolicyOverlaysLocked()
+	overlays := append([]policyOverlay(nil), g.overlays...)
 	g.mu.Unlock()
 
 	selected := selectedPolicyRule{
@@ -443,7 +431,7 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 		candidateRule, ok := profile.rules[candidateType]
 		candidateOverlayID := ""
 		candidateOverlaySource := ""
-		if overlayRule, overlay, matched := policyOverlayRule(overlays, candidateType, true); matched {
+		if overlayRule, overlay, matched := overrideHardBlockOverlayRule(overlays, candidateType); matched {
 			candidateRule = overlayRule
 			ok = true
 			candidateOverlayID = overlay.overlay.ID
@@ -451,7 +439,7 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 		} else if hardRule, hard := profileHardBlockRule(profileName, candidateType); hard {
 			candidateRule = hardRule
 			ok = true
-		} else if overlayRule, overlay, matched := policyOverlayRule(overlays, candidateType, false); matched {
+		} else if overlayRule, overlay, matched := normalPolicyOverlayRule(overlays, candidateType); matched {
 			candidateRule = overlayRule
 			ok = true
 			candidateOverlayID = overlay.overlay.ID
@@ -503,15 +491,12 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 }
 
-func (g *Guardian) orderedPolicyOverlaysLocked() []policyOverlay {
-	overlays := make([]policyOverlay, 0, len(g.overlayOrder))
-	for _, id := range g.overlayOrder {
-		overlay, ok := g.overlays[id]
-		if ok {
-			overlays = append(overlays, overlay)
-		}
-	}
-	return overlays
+func overrideHardBlockOverlayRule(overlays []policyOverlay, actionType string) (policyRule, policyOverlay, bool) {
+	return policyOverlayRule(overlays, actionType, true)
+}
+
+func normalPolicyOverlayRule(overlays []policyOverlay, actionType string) (policyRule, policyOverlay, bool) {
+	return policyOverlayRule(overlays, actionType, false)
 }
 
 func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
@@ -1240,6 +1225,14 @@ func cloneGuardianPolicyOverlay(overlay sdk.GuardianPolicyOverlay) sdk.GuardianP
 		overlay.Rules[i].Metadata = maps.Clone(overlay.Rules[i].Metadata)
 	}
 	return overlay
+}
+
+func cloneGuardianPolicyOverlays(overlays []policyOverlay) []sdk.GuardianPolicyOverlay {
+	out := make([]sdk.GuardianPolicyOverlay, 0, len(overlays))
+	for _, overlay := range overlays {
+		out = append(out, cloneGuardianPolicyOverlay(overlay.overlay))
+	}
+	return out
 }
 
 func cloneSDKProfiles(profiles map[string]sdk.GuardianProfile) map[string]sdk.GuardianProfile {

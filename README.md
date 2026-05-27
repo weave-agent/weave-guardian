@@ -54,6 +54,14 @@ Fields:
 - `approval_timeout`: duration to wait for an approval resolution before denying an ask decision. Defaults to `2m`.
 - `profiles`: custom profiles keyed by profile name using the shared SDK profile shape. Each custom profile extends `ask` by default, or the profile named by `metadata.extends`, and can override detailed action types through rules whose metadata includes `action_type`.
 
+## Policy Overlays
+
+Trusted extensions can push session-only policy overlays through `guardian.policy.overlay.push` with an `sdk.GuardianPolicyOverlay` payload. A non-empty `id` is required; pushing the same ID replaces the existing overlay and makes it newest for precedence. `guardian.policy.overlay.pop` removes an overlay by ID.
+
+Overlay rules reuse `sdk.GuardianProfileRule`. They can target coarse actions through `actions`, or detailed action types through `metadata.action_type`. Normal overlays are evaluated before the active profile and may allow, ask, or block actions without changing the selected profile or persisted config.
+
+Built-in hard blocks still win unless an overlay sets `override_hard_blocks: true`; those override overlays are evaluated before hard blocks. Decisions produced by overlays include `metadata.overlay_id` and `metadata.overlay_source` when available. Snapshots include active overlays in `overlays`, and Guardian publishes a fresh `guardian.snapshot` after successful push/pop.
+
 ## SDK Integration
 
 Guardian implements `sdk.Guardian` with `Decide`, `Resolve`, and `Snapshot`. The extension publishes and listens on the SDK Guardian bus topics:
@@ -65,6 +73,8 @@ Guardian implements `sdk.Guardian` with `Decide`, `Resolve`, and `Snapshot`. The
 - `guardian.snapshot.request`: requests a current snapshot.
 - `guardian.snapshot`: publishes `sdk.GuardianSnapshot`.
 - `guardian.grants.clear`: accepts `sdk.GuardianClearGrantsRequest`, or `nil` to clear all grants.
+- `guardian.policy.overlay.push`: accepts `sdk.GuardianPolicyOverlay` to add or replace a runtime overlay.
+- `guardian.policy.overlay.pop`: accepts `sdk.GuardianPolicyOverlayPop` to remove a runtime overlay.
 
 ## Action Classification
 
@@ -88,4 +98,4 @@ Ask decisions publish ID-based approval requests. Resolutions can allow or deny 
 
 In headless mode, ask decisions are blocked immediately without publishing an approval request. Outside headless mode, ask decisions wait up to `approval_timeout`; timeout or context cancellation blocks the action.
 
-Guardian records recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp. `RecentDecisions()` returns the last 100 records; this audit history is separate from SDK snapshots. Snapshots include the active profile, resolved profiles, pending approvals, and current grants. Clear-grants events can remove all grants or selected grant scopes and IDs.
+Guardian records recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp. `RecentDecisions()` returns the last 100 records; this audit history is separate from SDK snapshots. Snapshots include the active profile, resolved profiles, active runtime overlays, pending approvals, and current grants. Clear-grants events can remove all grants or selected grant scopes and IDs.

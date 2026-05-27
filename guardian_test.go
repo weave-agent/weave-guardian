@@ -172,44 +172,79 @@ func TestSubscribePushesPolicyOverlay(t *testing.T) {
 		},
 	}))
 
-	g.mu.Lock()
-	overlay, ok := g.overlays["overlay-write"]
-	g.mu.Unlock()
-	require.True(t, ok)
-	assert.Equal(t, "test", overlay.overlay.Source)
-	assert.Equal(t, "allow writes for test", overlay.overlay.Description)
-	assert.Equal(t, sdk.GuardianDecisionAllow, overlay.rules[actionFileWrite].decision)
-	assert.Equal(t, "test overlay allows writes", overlay.rules[actionFileWrite].reason)
-	assert.Equal(t, sdk.GuardianDecisionBlock, overlay.rules[actionNetworkWrite].decision)
-	assert.Equal(t, "policy overlay overlay-write overrides action", overlay.rules[actionNetworkWrite].reason)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Overlays, 1)
+	assert.Equal(t, "overlay-write", snapshot.Overlays[0].ID)
+	assert.Equal(t, "test", snapshot.Overlays[0].Source)
+	assert.Equal(t, "allow writes for test", snapshot.Overlays[0].Description)
+
+	writeDecision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-write",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionAllow, writeDecision.Action)
+	assert.Equal(t, "test overlay allows writes", writeDecision.Reason)
+	assert.Equal(t, "overlay-write", writeDecision.Metadata[overlayIDMetadataKey])
+
+	networkDecision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:      "req-overlay-network",
+		Action:  sdk.GuardianActionExec,
+		Command: "curl -X POST -d ok https://example.com",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionBlock, networkDecision.Action)
+	assert.Equal(t, "policy overlay overlay-write overrides action", networkDecision.Reason)
+	assert.Equal(t, "overlay-write", networkDecision.Metadata[overlayIDMetadataKey])
 }
 
 func TestSubscribeReplacesPolicyOverlayWithSameID(t *testing.T) {
-	g := New(Config{Profile: "ask"})
+	g := New(Config{Profile: "auto"})
 	bus := newStubBus()
 	require.NoError(t, g.Subscribe(bus))
 
 	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
 		ID:    "overlay-replace",
-		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionBlock)},
 	}))
 	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
 		ID:     "overlay-replace",
 		Source: "replacement",
-		Rules:  []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionAsk)},
+		Rules:  []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionBlock)},
 	}))
 
-	g.mu.Lock()
-	overlay, ok := g.overlays["overlay-replace"]
-	g.mu.Unlock()
-	require.True(t, ok)
-	assert.Equal(t, "replacement", overlay.overlay.Source)
-	assert.NotContains(t, overlay.rules, actionFileWrite)
-	assert.Equal(t, sdk.GuardianDecisionAsk, overlay.rules[actionNetworkRead].decision)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Overlays, 1)
+	assert.Equal(t, "replacement", snapshot.Overlays[0].Source)
+	require.Len(t, snapshot.Overlays[0].Rules, 1)
+	assert.Equal(t, actionNetworkRead, snapshot.Overlays[0].Rules[0].Metadata[actionTypeMetadataKey])
+
+	writeDecision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-replaced-write",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionAllow, writeDecision.Action)
+	assert.NotContains(t, writeDecision.Metadata, overlayIDMetadataKey)
+
+	networkDecision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:      "req-replaced-network",
+		Action:  sdk.GuardianActionExec,
+		Command: "curl https://example.com",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionBlock, networkDecision.Action)
+	assert.Equal(t, "overlay-replace", networkDecision.Metadata[overlayIDMetadataKey])
 }
 
 func TestSubscribePopsPolicyOverlay(t *testing.T) {
-	g := New(Config{Profile: "ask"})
+	g := newGuardian(Config{Profile: "ask"}, true)
 	bus := newStubBus()
 	require.NoError(t, g.Subscribe(bus))
 
@@ -217,14 +252,32 @@ func TestSubscribePopsPolicyOverlay(t *testing.T) {
 		ID:    "overlay-pop",
 		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
 	}))
+	allowed, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-pop-before",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+
 	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{
 		ID: "overlay-pop",
 	}))
 
-	g.mu.Lock()
-	_, ok := g.overlays["overlay-pop"]
-	g.mu.Unlock()
-	assert.False(t, ok)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Overlays)
+
+	blocked, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-pop-after",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionBlock, blocked.Action)
+	assert.NotContains(t, blocked.Metadata, overlayIDMetadataKey)
 }
 
 func TestSubscribeIgnoresUnknownPolicyOverlayPop(t *testing.T) {
@@ -240,12 +293,20 @@ func TestSubscribeIgnoresUnknownPolicyOverlayPop(t *testing.T) {
 		ID: "missing",
 	}))
 
-	g.mu.Lock()
-	_, ok := g.overlays["overlay-keep"]
-	count := len(g.overlays)
-	g.mu.Unlock()
-	assert.True(t, ok)
-	assert.Equal(t, 1, count)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Overlays, 1)
+	assert.Equal(t, "overlay-keep", snapshot.Overlays[0].ID)
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-unknown-pop",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, "overlay-keep", decision.Metadata[overlayIDMetadataKey])
 }
 
 func TestSubscribeIgnoresMalformedPolicyOverlayEvents(t *testing.T) {
@@ -260,10 +321,9 @@ func TestSubscribeIgnoresMalformedPolicyOverlayEvents(t *testing.T) {
 	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, nil))
 	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{}))
 
-	g.mu.Lock()
-	count := len(g.overlays)
-	g.mu.Unlock()
-	assert.Zero(t, count)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Overlays)
 }
 
 func TestPolicyOverlaysAreSessionOnlyAndDoNotMutateProfiles(t *testing.T) {
@@ -493,14 +553,37 @@ func TestPolicyOverlayCannotOverrideHardBlocksWithoutExplicitFlag(t *testing.T) 
 	tests := []struct {
 		name       string
 		actionType string
+		want       sdk.GuardianDecisionAction
 	}{
+		{
+			name:       "remote execution keeps requiring approval",
+			actionType: actionCommandExecRemote,
+			want:       sdk.GuardianDecisionAsk,
+		},
+		{
+			name:       "obfuscated command keeps requiring approval",
+			actionType: actionCommandObfuscated,
+			want:       sdk.GuardianDecisionAsk,
+		},
+		{
+			name:       "dangerous delete keeps requiring approval",
+			actionType: actionCommandDangerousDelete,
+			want:       sdk.GuardianDecisionAsk,
+		},
+		{
+			name:       "protected path write remains blocked",
+			actionType: actionFileProtected,
+			want:       sdk.GuardianDecisionBlock,
+		},
 		{
 			name:       "policy write remains blocked",
 			actionType: actionPolicyWrite,
+			want:       sdk.GuardianDecisionBlock,
 		},
 		{
 			name:       "secret exfiltration remains blocked",
 			actionType: actionSecretExfiltrate,
+			want:       sdk.GuardianDecisionBlock,
 		},
 	}
 
@@ -514,9 +597,10 @@ func TestPolicyOverlayCannotOverrideHardBlocksWithoutExplicitFlag(t *testing.T) 
 
 			decision := policyDecisionForActionType(g, tt.actionType)
 
-			assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+			assert.Equal(t, tt.want, decision.Action)
 			assert.Equal(t, tt.actionType, decision.Metadata[actionTypeMetadataKey])
 			assert.NotContains(t, decision.Reason, "normal-hard-block-allow")
+			assert.NotContains(t, decision.Metadata, overlayIDMetadataKey)
 		})
 	}
 }
@@ -526,6 +610,22 @@ func TestPolicyOverlayWithOverrideHardBlocksAllowsHardBlockedAction(t *testing.T
 		name       string
 		actionType string
 	}{
+		{
+			name:       "remote execution is allowed",
+			actionType: actionCommandExecRemote,
+		},
+		{
+			name:       "obfuscated command is allowed",
+			actionType: actionCommandObfuscated,
+		},
+		{
+			name:       "dangerous delete is allowed",
+			actionType: actionCommandDangerousDelete,
+		},
+		{
+			name:       "protected path write is allowed",
+			actionType: actionFileProtected,
+		},
 		{
 			name:       "policy write is allowed",
 			actionType: actionPolicyWrite,
@@ -552,6 +652,50 @@ func TestPolicyOverlayWithOverrideHardBlocksAllowsHardBlockedAction(t *testing.T
 			assert.Contains(t, decision.Reason, "override-hard-block-allow")
 		})
 	}
+}
+
+func TestPolicyOverlayHardBlockOverrideCoversProtectedPathDecide(t *testing.T) {
+	protectedPath := "/etc/hosts"
+	if runtime.GOOS == "windows" {
+		protectedPath = `C:\Windows\System32\drivers\etc\hosts`
+	}
+
+	t.Run("normal overlay cannot allow protected write request", func(t *testing.T) {
+		g := New(Config{Profile: "ask"})
+		require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+			ID:    "normal-protected-allow",
+			Rules: []sdk.GuardianProfileRule{profileRule(actionFileProtected, sdk.GuardianDecisionAllow)},
+		}))
+
+		decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+			ID:     "req-protected-normal",
+			Action: sdk.GuardianActionWrite,
+			Path:   protectedPath,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+		assert.Equal(t, actionFileProtected, decision.Metadata[actionTypeMetadataKey])
+		assert.NotContains(t, decision.Metadata, overlayIDMetadataKey)
+	})
+
+	t.Run("override overlay can allow protected write request", func(t *testing.T) {
+		g := New(Config{Profile: "ask"})
+		require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+			ID:                 "override-protected-allow",
+			OverrideHardBlocks: true,
+			Rules:              []sdk.GuardianProfileRule{profileRule(actionFileProtected, sdk.GuardianDecisionAllow)},
+		}))
+
+		decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+			ID:     "req-protected-override",
+			Action: sdk.GuardianActionWrite,
+			Path:   protectedPath,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+		assert.Equal(t, actionFileProtected, decision.Metadata[actionTypeMetadataKey])
+		assert.Equal(t, "override-protected-allow", decision.Metadata[overlayIDMetadataKey])
+	})
 }
 
 func TestPolicyOverlayOverrideFallsBackToCurrentHardBlockBehaviorWhenNoRuleMatches(t *testing.T) {
@@ -1539,6 +1683,30 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			name:     "kubectl raw config is secret read",
 			command:  "kubectl config view --raw",
 			wantType: actionSecretRead,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "aws s3 upload writes remote",
+			command:  "aws s3 cp artifact.txt s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "aws s3 download reads remote",
+			command:  "aws s3 cp s3://example-bucket/artifact.txt artifact.txt",
+			wantType: actionNetworkRead,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "gcloud storage upload writes remote",
+			command:  "gcloud storage cp artifact.txt gs://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "gcloud storage download reads remote",
+			command:  "gcloud storage cp gs://example-bucket/artifact.txt artifact.txt",
+			wantType: actionNetworkRead,
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{

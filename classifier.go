@@ -10,8 +10,6 @@ import (
 	"github.com/weave-agent/weave/sdk"
 )
 
-const envFileName = ".env"
-
 const (
 	actionFileRead          = "file.read"
 	actionFileWrite         = "file.write"
@@ -178,7 +176,7 @@ func isSensitivePath(path classifiedPath) bool {
 	}
 
 	base := path.base
-	if base == envFileName || strings.HasPrefix(base, envFileName+".") || base == ".npmrc" || base == ".pypirc" || base == ".netrc" {
+	if base == ".env" || strings.HasPrefix(base, ".env.") || base == ".npmrc" || base == ".pypirc" || base == ".netrc" { //nolint:goconst // Keeping the adjacent sensitive filename literals readable.
 		return true
 	}
 	if strings.HasPrefix(base, "id_") || strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
