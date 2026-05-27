@@ -57,6 +57,11 @@ type policyRule struct {
 	reason   string
 }
 
+type policyOverlay struct {
+	overlay sdk.GuardianPolicyOverlay
+	rules   map[string]policyRule
+}
+
 // Guardian owns action classification, policy decisions, approvals, grants, and
 // snapshots.
 type Guardian struct {
@@ -66,11 +71,12 @@ type Guardian struct {
 	headless        bool
 	approvalTimeout time.Duration
 
-	mu      sync.Mutex
-	pending map[string]*pendingApproval
-	grants  []sdk.GuardianGrant
-	history []DecisionRecord
-	nextID  uint64
+	mu       sync.Mutex
+	pending  map[string]*pendingApproval
+	grants   []sdk.GuardianGrant
+	history  []DecisionRecord
+	overlays map[string]policyOverlay
+	nextID   uint64
 }
 
 // DecisionRecord is the bounded audit trail Guardian keeps for recent
@@ -113,6 +119,7 @@ func newGuardian(cfg Config, headless bool) *Guardian {
 		headless:        headless,
 		approvalTimeout: approvalTimeout(cfg.ApprovalTimeout),
 		pending:         make(map[string]*pendingApproval),
+		overlays:        make(map[string]policyOverlay),
 	}
 }
 
@@ -146,6 +153,22 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 	})
 	bus.On(sdk.GuardianClearGrantsTopic, func(ev sdk.Event) error {
 		g.clearGrants(ev.Payload)
+		return nil
+	})
+	bus.On(sdk.GuardianPolicyOverlayPushTopic, func(ev sdk.Event) error {
+		payload, ok := ev.Payload.(sdk.GuardianPolicyOverlay)
+		if !ok {
+			return nil
+		}
+		g.pushPolicyOverlay(payload)
+		return nil
+	})
+	bus.On(sdk.GuardianPolicyOverlayPopTopic, func(ev sdk.Event) error {
+		payload, ok := ev.Payload.(sdk.GuardianPolicyOverlayPop)
+		if !ok {
+			return nil
+		}
+		g.popPolicyOverlay(payload.ID)
 		return nil
 	})
 	bus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
@@ -281,6 +304,52 @@ func (g *Guardian) changeProfile(profile string) {
 	}
 
 	g.cfg.Profile = profile
+}
+
+func (g *Guardian) pushPolicyOverlay(overlay sdk.GuardianPolicyOverlay) {
+	if overlay.ID == "" {
+		return
+	}
+
+	compiled := policyOverlay{
+		overlay: cloneGuardianPolicyOverlay(overlay),
+		rules:   compileOverlayRules(overlay),
+	}
+
+	g.mu.Lock()
+	g.overlays[overlay.ID] = compiled
+	g.mu.Unlock()
+}
+
+func (g *Guardian) popPolicyOverlay(id string) {
+	if id == "" {
+		return
+	}
+
+	g.mu.Lock()
+	delete(g.overlays, id)
+	g.mu.Unlock()
+}
+
+func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string]policyRule {
+	rules := make(map[string]policyRule)
+	for _, rule := range overlay.Rules {
+		actionTypes := profileRuleActionTypes(rule)
+		if len(actionTypes) == 0 {
+			continue
+		}
+		reason := rule.Reason
+		if reason == "" {
+			reason = fmt.Sprintf("policy overlay %s overrides action", overlay.ID)
+		}
+		for _, actionType := range actionTypes {
+			rules[actionType] = policyRule{
+				decision: normalizeDecision(rule.Decision),
+				reason:   reason,
+			}
+		}
+	}
+	return rules
 }
 
 func (g *Guardian) RecentDecisions() []DecisionRecord {
@@ -1064,6 +1133,15 @@ func cloneGuardianApproval(approval sdk.GuardianApproval) sdk.GuardianApproval {
 func cloneGuardianRequest(req sdk.GuardianRequest) sdk.GuardianRequest {
 	req.Metadata = maps.Clone(req.Metadata)
 	return req
+}
+
+func cloneGuardianPolicyOverlay(overlay sdk.GuardianPolicyOverlay) sdk.GuardianPolicyOverlay {
+	overlay.Rules = append([]sdk.GuardianProfileRule(nil), overlay.Rules...)
+	for i := range overlay.Rules {
+		overlay.Rules[i].Actions = append([]sdk.GuardianAction(nil), overlay.Rules[i].Actions...)
+		overlay.Rules[i].Metadata = maps.Clone(overlay.Rules[i].Metadata)
+	}
+	return overlay
 }
 
 func cloneSDKProfiles(profiles map[string]sdk.GuardianProfile) map[string]sdk.GuardianProfile {

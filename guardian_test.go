@@ -150,6 +150,122 @@ func TestSubscribeIgnoresUnknownGuardianProfileChange(t *testing.T) {
 	assert.Equal(t, "ask", snapshot.CurrentProfile)
 }
 
+func TestSubscribePushesPolicyOverlay(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:          "overlay-write",
+		Source:      "test",
+		Description: "allow writes for test",
+		Rules: []sdk.GuardianProfileRule{
+			{
+				Actions:  []sdk.GuardianAction{sdk.GuardianActionWrite},
+				Decision: sdk.GuardianDecisionAllow,
+				Reason:   "test overlay allows writes",
+			},
+			{
+				Decision: sdk.GuardianDecisionAction("invalid"),
+				Metadata: map[string]any{actionTypeMetadataKey: actionNetworkWrite},
+			},
+		},
+	}))
+
+	g.mu.Lock()
+	overlay, ok := g.overlays["overlay-write"]
+	g.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, "test", overlay.overlay.Source)
+	assert.Equal(t, "allow writes for test", overlay.overlay.Description)
+	assert.Equal(t, sdk.GuardianDecisionAllow, overlay.rules[actionFileWrite].decision)
+	assert.Equal(t, "test overlay allows writes", overlay.rules[actionFileWrite].reason)
+	assert.Equal(t, sdk.GuardianDecisionBlock, overlay.rules[actionNetworkWrite].decision)
+	assert.Equal(t, "policy overlay overlay-write overrides action", overlay.rules[actionNetworkWrite].reason)
+}
+
+func TestSubscribeReplacesPolicyOverlayWithSameID(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:    "overlay-replace",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:     "overlay-replace",
+		Source: "replacement",
+		Rules:  []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionAsk)},
+	}))
+
+	g.mu.Lock()
+	overlay, ok := g.overlays["overlay-replace"]
+	g.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, "replacement", overlay.overlay.Source)
+	assert.NotContains(t, overlay.rules, actionFileWrite)
+	assert.Equal(t, sdk.GuardianDecisionAsk, overlay.rules[actionNetworkRead].decision)
+}
+
+func TestSubscribePopsPolicyOverlay(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:    "overlay-pop",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{
+		ID: "overlay-pop",
+	}))
+
+	g.mu.Lock()
+	_, ok := g.overlays["overlay-pop"]
+	g.mu.Unlock()
+	assert.False(t, ok)
+}
+
+func TestSubscribeIgnoresUnknownPolicyOverlayPop(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:    "overlay-keep",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{
+		ID: "missing",
+	}))
+
+	g.mu.Lock()
+	_, ok := g.overlays["overlay-keep"]
+	count := len(g.overlays)
+	g.mu.Unlock()
+	assert.True(t, ok)
+	assert.Equal(t, 1, count)
+}
+
+func TestSubscribeIgnoresMalformedPolicyOverlayEvents(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, nil))
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, nil))
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{}))
+
+	g.mu.Lock()
+	count := len(g.overlays)
+	g.mu.Unlock()
+	assert.Zero(t, count)
+}
+
 func TestBuiltInProfilePolicies(t *testing.T) {
 	tests := []struct {
 		name       string

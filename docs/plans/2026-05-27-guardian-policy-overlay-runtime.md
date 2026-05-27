@@ -51,12 +51,12 @@
 ## Implementation Steps
 
 ### Task 1: Add overlay state and bus lifecycle
-- [ ] add overlay storage to `Guardian` state while preserving existing profile/grant/pending behavior
-- [ ] subscribe to `sdk.GuardianPolicyOverlayPushTopic` and `sdk.GuardianPolicyOverlayPopTopic` in `Subscribe`
-- [ ] implement push semantics: validate non-empty ID, normalize rules through existing profile rule conversion, replace existing overlay with same ID
-- [ ] implement pop semantics: remove overlay by ID and ignore unknown IDs or malformed payloads
-- [ ] write tests for push, replacement, pop, unknown pop, and malformed event payloads
-- [ ] run `go test ./...` - must pass before next task
+- [x] add overlay storage to `Guardian` state while preserving existing profile/grant/pending behavior
+- [x] subscribe to `sdk.GuardianPolicyOverlayPushTopic` and `sdk.GuardianPolicyOverlayPopTopic` in `Subscribe`
+- [x] implement push semantics: validate non-empty ID, normalize rules through existing profile rule conversion, replace existing overlay with same ID
+- [x] implement pop semantics: remove overlay by ID and ignore unknown IDs or malformed payloads
+- [x] write tests for push, replacement, pop, unknown pop, and malformed event payloads
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 2: Include overlays in snapshots
 - [ ] update `Snapshot` to clone active overlays into `sdk.GuardianSnapshot.Overlays`
