@@ -375,7 +375,7 @@ func (g *Guardian) removePolicyOverlayLocked(id string) {
 func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string]policyRule {
 	rules := make(map[string]policyRule)
 	for _, rule := range overlay.Rules {
-		actionTypes := profileRuleActionTypes(rule)
+		actionTypes := overlayRuleActionTypes(rule)
 		if len(actionTypes) == 0 {
 			continue
 		}
@@ -391,6 +391,15 @@ func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string]policyRul
 		}
 	}
 	return rules
+}
+
+func overlayRuleActionTypes(rule sdk.GuardianProfileRule) []string {
+	if rule.Metadata != nil {
+		if actionType, ok := metadataActionType(rule.Metadata); ok {
+			return []string{actionType}
+		}
+	}
+	return profileRuleActionTypes(rule)
 }
 
 func (g *Guardian) RecentDecisions() []DecisionRecord {

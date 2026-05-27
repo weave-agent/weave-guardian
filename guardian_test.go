@@ -605,6 +605,30 @@ func TestPolicyOverlayCannotOverrideHardBlocksWithoutExplicitFlag(t *testing.T) 
 	}
 }
 
+func TestPolicyOverlayDetailedActionTypeDoesNotExpandCoarseActions(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:                 "override-mixed-targets",
+		OverrideHardBlocks: true,
+		Rules: []sdk.GuardianProfileRule{
+			{
+				Actions:  []sdk.GuardianAction{sdk.GuardianActionWrite},
+				Decision: sdk.GuardianDecisionAllow,
+				Metadata: map[string]any{actionTypeMetadataKey: actionFileWrite},
+			},
+		},
+	}))
+
+	writeDecision := policyDecisionForActionType(g, actionFileWrite)
+	assert.Equal(t, sdk.GuardianDecisionAllow, writeDecision.Action)
+	assert.Equal(t, "override-mixed-targets", writeDecision.Metadata[overlayIDMetadataKey])
+
+	policyDecision := policyDecisionForActionType(g, actionPolicyWrite)
+	assert.Equal(t, sdk.GuardianDecisionBlock, policyDecision.Action)
+	assert.Equal(t, actionPolicyWrite, policyDecision.Metadata[actionTypeMetadataKey])
+	assert.NotContains(t, policyDecision.Metadata, overlayIDMetadataKey)
+}
+
 func TestPolicyOverlayWithOverrideHardBlocksAllowsHardBlockedAction(t *testing.T) {
 	tests := []struct {
 		name       string
