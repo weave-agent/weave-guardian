@@ -758,7 +758,7 @@ func cloudCommandArgsAfterGlobalOptions(args, lowerArgs []string) ([]string, []s
 		if !strings.HasPrefix(arg, "-") {
 			return args[i:], lowerArgs[i:]
 		}
-		if cloudCopyOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
+		if cloudOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
 			i++
 		}
 	}
@@ -782,7 +782,7 @@ func cloudCopyOperands(args []string) []string {
 			return append(out, args[i+1:]...)
 		}
 		if strings.HasPrefix(arg, "-") {
-			if cloudCopyOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
+			if cloudOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
 				i++
 			}
 			continue
@@ -824,6 +824,25 @@ func cloudCopyOptionTakesValue(arg string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func cloudOptionTakesValue(arg string) bool {
+	name, _, _ := strings.Cut(strings.ToLower(arg), "=")
+	switch name {
+	case
+		"--access-token-file",
+		"--account",
+		"--api-endpoint-overrides",
+		"--configuration",
+		"--flags-file",
+		"--format",
+		"--impersonate-service-account",
+		"--log-file",
+		"--output":
+		return true
+	default:
+		return cloudCopyOptionTakesValue(arg)
 	}
 }
 

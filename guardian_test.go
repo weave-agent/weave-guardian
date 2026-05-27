@@ -1809,6 +1809,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{
+			name:     "aws s3 upload with leading output format writes remote",
+			command:  "aws --output json s3 cp artifact.txt s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
 			name:     "aws s3 multi-source upload writes remote",
 			command:  "aws s3 cp artifact-one.txt artifact-two.txt s3://example-bucket/",
 			wantType: actionNetworkWrite,
@@ -1817,6 +1823,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 		{
 			name:     "aws s3 upload with value flag before destination writes remote",
 			command:  "aws s3 cp artifact.txt --content-type text/plain s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "aws s3 upload with trailing output format writes remote",
+			command:  "aws s3 cp artifact.txt s3://example-bucket/artifact.txt --output json",
 			wantType: actionNetworkWrite,
 			want:     sdk.GuardianDecisionAsk,
 		},
@@ -1851,6 +1863,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{
+			name:     "gcloud storage upload with global format writes remote",
+			command:  "gcloud --format json storage cp artifact.txt gs://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
 			name:     "gcloud storage multi-source upload writes remote",
 			command:  "gcloud storage cp artifact-one.txt artifact-two.txt gs://example-bucket/",
 			wantType: actionNetworkWrite,
@@ -1859,6 +1877,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 		{
 			name:     "gcloud storage upload with value flag before destination writes remote",
 			command:  "gcloud storage cp artifact.txt --content-type text/plain gs://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "gcloud storage upload with trailing account writes remote",
+			command:  "gcloud storage cp artifact.txt gs://example-bucket/artifact.txt --account deploy@example.com",
 			wantType: actionNetworkWrite,
 			want:     sdk.GuardianDecisionAsk,
 		},
