@@ -722,6 +722,7 @@ func classifyCloudCredentialOrNetworkCommand(name string, args []string) string 
 }
 
 func classifyAWSCommand(args, lowerArgs []string) string {
+	args, lowerArgs = cloudCommandArgsAfterGlobalOptions(args, lowerArgs)
 	if len(lowerArgs) >= 3 && lowerArgs[0] == "configure" && lowerArgs[1] == "get" {
 		return actionSecretRead
 	}
@@ -735,6 +736,7 @@ func classifyAWSCommand(args, lowerArgs []string) string {
 }
 
 func classifyGCloudCommand(args, lowerArgs []string) string {
+	args, lowerArgs = cloudCommandArgsAfterGlobalOptions(args, lowerArgs)
 	if slices.Contains(lowerArgs, "auth") || slices.Contains(lowerArgs, "credentials") {
 		return actionSecretRead
 	}
@@ -745,6 +747,22 @@ func classifyGCloudCommand(args, lowerArgs []string) string {
 		return actionNetworkRead
 	}
 	return actionCommandExecLocal
+}
+
+func cloudCommandArgsAfterGlobalOptions(args, lowerArgs []string) ([]string, []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == shellOptionTerminator {
+			return args[i+1:], lowerArgs[i+1:]
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return args[i:], lowerArgs[i:]
+		}
+		if cloudCopyOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
+			i++
+		}
+	}
+	return nil, nil
 }
 
 func cloudCopyWritesRemote(args []string) bool {

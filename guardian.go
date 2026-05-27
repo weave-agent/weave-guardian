@@ -436,42 +436,14 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 			reason:   "all stages allowed",
 		},
 	}
-	for _, candidateType := range actionTypes {
-		candidateRule, ok := profile.rules[candidateType]
-		candidateOverlayID := ""
-		candidateOverlaySource := ""
-		if overlayRule, overlay, matched := overrideHardBlockOverlayRule(overlays, candidateType); matched {
-			candidateRule = overlayRule
-			ok = true
-			candidateOverlayID = overlay.overlay.ID
-			candidateOverlaySource = overlay.overlay.Source
-		} else if hardRule, hard := profileHardBlockRule(profileName, candidateType); hard {
-			candidateRule = hardRule
-			ok = true
-		} else if overlayRule, overlay, matched := normalPolicyOverlayRule(overlays, candidateType); matched {
-			candidateRule = overlayRule
-			ok = true
-			candidateOverlayID = overlay.overlay.ID
-			candidateOverlaySource = overlay.overlay.Source
-		}
-		if !ok {
-			decision := sdk.GuardianDecisionBlock
-			if g.cfg.AskFallback {
-				decision = sdk.GuardianDecisionAsk
-			}
-			candidateRule = policyRule{
-				decision: decision,
-				reason:   fmt.Sprintf("%s has no policy rule in profile %s", candidateType, profile.name),
-			}
-		}
-		if shouldUseDecision(candidateType, candidateRule, selected.actionType, selected.rule) {
-			selected = selectedPolicyRule{
-				actionType: candidateType,
-				rule:       candidateRule,
-				overlayID:  candidateOverlayID,
-				source:     candidateOverlaySource,
-			}
-		}
+	if overrideSelected, ok := selectPolicyOverlayRule(overlays, actionTypes, true); ok {
+		selected = overrideSelected
+	} else if hardSelected, ok := selectHardBlockRule(profileName, actionTypes); ok {
+		selected = hardSelected
+	} else if normalSelected, ok := selectPolicyOverlayRule(overlays, actionTypes, false); ok {
+		selected = normalSelected
+	} else {
+		selected = selectProfilePolicyRule(profile, actionTypes, g.cfg.AskFallback)
 	}
 
 	metadata := map[string]any{
@@ -500,12 +472,24 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 }
 
-func overrideHardBlockOverlayRule(overlays []policyOverlay, actionType string) (policyRule, policyOverlay, bool) {
-	return policyOverlayRule(overlays, actionType, true)
-}
-
-func normalPolicyOverlayRule(overlays []policyOverlay, actionType string) (policyRule, policyOverlay, bool) {
-	return policyOverlayRule(overlays, actionType, false)
+func selectPolicyOverlayRule(overlays []policyOverlay, actionTypes []string, overrideHardBlocks bool) (selectedPolicyRule, bool) {
+	var selected selectedPolicyRule
+	for _, candidateType := range actionTypes {
+		rule, overlay, ok := policyOverlayRule(overlays, candidateType, overrideHardBlocks)
+		if !ok {
+			continue
+		}
+		candidate := selectedPolicyRule{
+			actionType: candidateType,
+			rule:       rule,
+			overlayID:  overlay.overlay.ID,
+			source:     overlay.overlay.Source,
+		}
+		if shouldUseDecision(candidate.actionType, candidate.rule, selected.actionType, selected.rule) {
+			selected = candidate
+		}
+	}
+	return selected, selected.actionType != ""
 }
 
 func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
@@ -519,6 +503,47 @@ func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHard
 		}
 	}
 	return policyRule{}, policyOverlay{}, false
+}
+
+func selectHardBlockRule(profileName string, actionTypes []string) (selectedPolicyRule, bool) {
+	var selected selectedPolicyRule
+	for _, candidateType := range actionTypes {
+		rule, ok := profileHardBlockRule(profileName, candidateType)
+		if !ok {
+			continue
+		}
+		if shouldUseDecision(candidateType, rule, selected.actionType, selected.rule) {
+			selected = selectedPolicyRule{
+				actionType: candidateType,
+				rule:       rule,
+			}
+		}
+	}
+	return selected, selected.actionType != ""
+}
+
+func selectProfilePolicyRule(profile policyProfile, actionTypes []string, askFallback bool) selectedPolicyRule {
+	var selected selectedPolicyRule
+	for _, candidateType := range actionTypes {
+		rule, ok := profile.rules[candidateType]
+		if !ok {
+			decision := sdk.GuardianDecisionBlock
+			if askFallback {
+				decision = sdk.GuardianDecisionAsk
+			}
+			rule = policyRule{
+				decision: decision,
+				reason:   fmt.Sprintf("%s has no policy rule in profile %s", candidateType, profile.name),
+			}
+		}
+		if shouldUseDecision(candidateType, rule, selected.actionType, selected.rule) {
+			selected = selectedPolicyRule{
+				actionType: candidateType,
+				rule:       rule,
+			}
+		}
+	}
+	return selected
 }
 
 func resolveProfiles(custom map[string]sdk.GuardianProfile) map[string]policyProfile {
