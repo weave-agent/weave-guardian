@@ -59,12 +59,12 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 2: Include overlays in snapshots
-- [ ] update `Snapshot` to clone active overlays into `sdk.GuardianSnapshot.Overlays`
-- [ ] ensure snapshot overlays preserve ID, source, description, rules, and `OverrideHardBlocks`
-- [ ] publish `GuardianSnapshotTopic` after overlay push/pop so UI extensions can refresh
-- [ ] write tests that pushed overlays appear in snapshots and popped overlays disappear
-- [ ] write tests that snapshot overlay slices/maps cannot mutate internal Guardian state
-- [ ] run `go test ./...` - must pass before next task
+- [x] update `Snapshot` to clone active overlays into `sdk.GuardianSnapshot.Overlays`
+- [x] ensure snapshot overlays preserve ID, source, description, rules, and `OverrideHardBlocks`
+- [x] publish `GuardianSnapshotTopic` after overlay push/pop so UI extensions can refresh
+- [x] write tests that pushed overlays appear in snapshots and popped overlays disappear
+- [x] write tests that snapshot overlay slices/maps cannot mutate internal Guardian state
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 3: Apply normal overlays during decisions
 - [ ] introduce internal compiled overlay representation using existing `policyRule` and action-type resolution helpers

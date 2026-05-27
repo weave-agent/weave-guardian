@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -160,7 +161,9 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 		if !ok {
 			return nil
 		}
-		g.pushPolicyOverlay(payload)
+		if g.pushPolicyOverlay(payload) {
+			g.publishSnapshot()
+		}
 		return nil
 	})
 	bus.On(sdk.GuardianPolicyOverlayPopTopic, func(ev sdk.Event) error {
@@ -168,7 +171,9 @@ func (g *Guardian) Subscribe(bus sdk.Bus) error {
 		if !ok {
 			return nil
 		}
-		g.popPolicyOverlay(payload.ID)
+		if g.popPolicyOverlay(payload.ID) {
+			g.publishSnapshot()
+		}
 		return nil
 	})
 	bus.Publish(sdk.NewEvent(sdk.GuardianRegisteredTopic, g))
@@ -280,15 +285,35 @@ func (g *Guardian) Snapshot(context.Context) (sdk.GuardianSnapshot, error) {
 	for _, approval := range g.pending {
 		pending = append(pending, cloneGuardianApproval(approval.approval))
 	}
+	overlays := make([]sdk.GuardianPolicyOverlay, 0, len(g.overlays))
+	for _, overlay := range g.overlays {
+		overlays = append(overlays, cloneGuardianPolicyOverlay(overlay.overlay))
+	}
+	sort.Slice(overlays, func(i, j int) bool {
+		return overlays[i].ID < overlays[j].ID
+	})
 	profiles := cloneSDKProfiles(sdkProfiles(g.profiles))
 	g.mu.Unlock()
 
 	return sdk.GuardianSnapshot{
 		CurrentProfile: currentProfile,
 		Profiles:       profiles,
+		Overlays:       overlays,
 		Grants:         grants,
 		Pending:        pending,
 	}, nil
+}
+
+func (g *Guardian) publishSnapshot() {
+	if g.bus == nil {
+		return
+	}
+
+	snapshot, err := g.Snapshot(context.Background())
+	if err != nil {
+		return
+	}
+	g.bus.Publish(sdk.NewEvent(sdk.GuardianSnapshotTopic, snapshot))
 }
 
 func (g *Guardian) changeProfile(profile string) {
@@ -306,9 +331,9 @@ func (g *Guardian) changeProfile(profile string) {
 	g.cfg.Profile = profile
 }
 
-func (g *Guardian) pushPolicyOverlay(overlay sdk.GuardianPolicyOverlay) {
+func (g *Guardian) pushPolicyOverlay(overlay sdk.GuardianPolicyOverlay) bool {
 	if overlay.ID == "" {
-		return
+		return false
 	}
 
 	compiled := policyOverlay{
@@ -319,16 +344,19 @@ func (g *Guardian) pushPolicyOverlay(overlay sdk.GuardianPolicyOverlay) {
 	g.mu.Lock()
 	g.overlays[overlay.ID] = compiled
 	g.mu.Unlock()
+	return true
 }
 
-func (g *Guardian) popPolicyOverlay(id string) {
+func (g *Guardian) popPolicyOverlay(id string) bool {
 	if id == "" {
-		return
+		return false
 	}
 
 	g.mu.Lock()
+	_, ok := g.overlays[id]
 	delete(g.overlays, id)
 	g.mu.Unlock()
+	return ok
 }
 
 func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string]policyRule {

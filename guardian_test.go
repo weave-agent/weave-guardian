@@ -266,6 +266,113 @@ func TestSubscribeIgnoresMalformedPolicyOverlayEvents(t *testing.T) {
 	assert.Zero(t, count)
 }
 
+func TestSnapshotIncludesAndRemovesPolicyOverlays(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:                 "overlay-snapshot",
+		Source:             "test-extension",
+		Description:        "snapshot fixture",
+		OverrideHardBlocks: true,
+		Rules: []sdk.GuardianProfileRule{
+			{
+				Actions:  []sdk.GuardianAction{sdk.GuardianActionWrite},
+				Decision: sdk.GuardianDecisionAllow,
+				Reason:   "snapshot allows writes",
+				Metadata: map[string]any{actionTypeMetadataKey: actionFileWrite},
+			},
+		},
+	}))
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Overlays, 1)
+	overlay := snapshot.Overlays[0]
+	assert.Equal(t, "overlay-snapshot", overlay.ID)
+	assert.Equal(t, "test-extension", overlay.Source)
+	assert.Equal(t, "snapshot fixture", overlay.Description)
+	assert.True(t, overlay.OverrideHardBlocks)
+	require.Len(t, overlay.Rules, 1)
+	assert.Equal(t, []sdk.GuardianAction{sdk.GuardianActionWrite}, overlay.Rules[0].Actions)
+	assert.Equal(t, sdk.GuardianDecisionAllow, overlay.Rules[0].Decision)
+	assert.Equal(t, "snapshot allows writes", overlay.Rules[0].Reason)
+	assert.Equal(t, actionFileWrite, overlay.Rules[0].Metadata[actionTypeMetadataKey])
+
+	var pushedSnapshot sdk.GuardianSnapshot
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			payload, ok := ev.Payload.(sdk.GuardianSnapshot)
+			if ev.Topic == sdk.GuardianSnapshotTopic && ok && len(payload.Overlays) == 1 {
+				pushedSnapshot = payload
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+	assert.Equal(t, "overlay-snapshot", pushedSnapshot.Overlays[0].ID)
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPopTopic, sdk.GuardianPolicyOverlayPop{
+		ID: "overlay-snapshot",
+	}))
+
+	snapshot, err = g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Overlays)
+
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			payload, ok := ev.Payload.(sdk.GuardianSnapshot)
+			if ev.Topic == sdk.GuardianSnapshotTopic && ok && len(payload.Overlays) == 0 {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+}
+
+func TestSnapshotPolicyOverlaysCannotMutateGuardianState(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	bus.Publish(sdk.NewEvent(sdk.GuardianPolicyOverlayPushTopic, sdk.GuardianPolicyOverlay{
+		ID:          "overlay-copy",
+		Source:      "original-source",
+		Description: "original description",
+		Rules: []sdk.GuardianProfileRule{
+			{
+				Actions:  []sdk.GuardianAction{sdk.GuardianActionWrite},
+				Decision: sdk.GuardianDecisionAllow,
+				Metadata: map[string]any{actionTypeMetadataKey: actionFileWrite},
+			},
+		},
+	}))
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Overlays, 1)
+	require.Len(t, snapshot.Overlays[0].Rules, 1)
+	require.Len(t, snapshot.Overlays[0].Rules[0].Actions, 1)
+
+	snapshot.Overlays[0].ID = "mutated-id"
+	snapshot.Overlays[0].Source = "mutated-source"
+	snapshot.Overlays[0].Rules[0].Actions[0] = sdk.GuardianActionRead
+	snapshot.Overlays[0].Rules[0].Metadata[actionTypeMetadataKey] = actionFileRead
+	snapshot.Overlays[0].Rules = nil
+
+	next, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, next.Overlays, 1)
+	assert.Equal(t, "overlay-copy", next.Overlays[0].ID)
+	assert.Equal(t, "original-source", next.Overlays[0].Source)
+	assert.Equal(t, "original description", next.Overlays[0].Description)
+	require.Len(t, next.Overlays[0].Rules, 1)
+	assert.Equal(t, []sdk.GuardianAction{sdk.GuardianActionWrite}, next.Overlays[0].Rules[0].Actions)
+	assert.Equal(t, actionFileWrite, next.Overlays[0].Rules[0].Metadata[actionTypeMetadataKey])
+}
+
 func TestBuiltInProfilePolicies(t *testing.T) {
 	tests := []struct {
 		name       string
