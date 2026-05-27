@@ -430,10 +430,13 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 	for _, candidateType := range actionTypes {
 		candidateRule, ok := profile.rules[candidateType]
-		if hardRule, hard := profileHardBlockRule(profileName, candidateType); hard {
+		if overlayRule, overlay := policyOverlayRule(overlays, candidateType, true); overlay {
+			candidateRule = overlayRule
+			ok = true
+		} else if hardRule, hard := profileHardBlockRule(profileName, candidateType); hard {
 			candidateRule = hardRule
 			ok = true
-		} else if overlayRule, overlay := policyOverlayRule(overlays, candidateType); overlay {
+		} else if overlayRule, overlay := policyOverlayRule(overlays, candidateType, false); overlay {
 			candidateRule = overlayRule
 			ok = true
 		}
@@ -486,10 +489,10 @@ func (g *Guardian) orderedPolicyOverlaysLocked() []policyOverlay {
 	return overlays
 }
 
-func policyOverlayRule(overlays []policyOverlay, actionType string) (policyRule, bool) {
+func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, bool) {
 	for i := len(overlays) - 1; i >= 0; i-- {
 		overlay := overlays[i]
-		if overlay.overlay.OverrideHardBlocks {
+		if overlay.overlay.OverrideHardBlocks != overrideHardBlocks {
 			continue
 		}
 		rule, ok := overlay.rules[actionType]

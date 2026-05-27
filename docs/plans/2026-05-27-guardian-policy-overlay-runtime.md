@@ -76,12 +76,12 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 4: Apply explicit hard-block override semantics
-- [ ] split hard-block evaluation so overlays with `OverrideHardBlocks=true` are evaluated before built-in hard blocks
-- [ ] preserve current hard-block behavior when no override overlay matches
-- [ ] ensure normal overlays without `OverrideHardBlocks` cannot override hard blocks
-- [ ] write tests proving normal overlays cannot allow `policy.write` or secret exfiltration hard blocks
-- [ ] write tests proving override overlays can allow a hard-blocked action type when explicitly configured
-- [ ] run `go test ./...` - must pass before next task
+- [x] split hard-block evaluation so overlays with `OverrideHardBlocks=true` are evaluated before built-in hard blocks
+- [x] preserve current hard-block behavior when no override overlay matches
+- [x] ensure normal overlays without `OverrideHardBlocks` cannot override hard blocks
+- [x] write tests proving normal overlays cannot allow `policy.write` or secret exfiltration hard blocks
+- [x] write tests proving override overlays can allow a hard-blocked action type when explicitly configured
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 5: Preserve grants, approvals, and decision metadata behavior
 - [ ] ensure overlay-produced `ask` decisions still create approvals and can be resolved through existing approval flow

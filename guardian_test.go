@@ -430,6 +430,86 @@ func TestPolicyOverlayNewestAndReplacementPrecedence(t *testing.T) {
 	assert.Contains(t, decision.Reason, "older")
 }
 
+func TestPolicyOverlayCannotOverrideHardBlocksWithoutExplicitFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		actionType string
+	}{
+		{
+			name:       "policy write remains blocked",
+			actionType: actionPolicyWrite,
+		},
+		{
+			name:       "secret exfiltration remains blocked",
+			actionType: actionSecretExfiltrate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := New(Config{Profile: "ask"})
+			require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+				ID:    "normal-hard-block-allow",
+				Rules: []sdk.GuardianProfileRule{profileRule(tt.actionType, sdk.GuardianDecisionAllow)},
+			}))
+
+			decision := policyDecisionForActionType(g, tt.actionType)
+
+			assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+			assert.Equal(t, tt.actionType, decision.Metadata[actionTypeMetadataKey])
+			assert.NotContains(t, decision.Reason, "normal-hard-block-allow")
+		})
+	}
+}
+
+func TestPolicyOverlayWithOverrideHardBlocksAllowsHardBlockedAction(t *testing.T) {
+	tests := []struct {
+		name       string
+		actionType string
+	}{
+		{
+			name:       "policy write is allowed",
+			actionType: actionPolicyWrite,
+		},
+		{
+			name:       "secret exfiltration is allowed",
+			actionType: actionSecretExfiltrate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := New(Config{Profile: "ask"})
+			require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+				ID:                 "override-hard-block-allow",
+				OverrideHardBlocks: true,
+				Rules:              []sdk.GuardianProfileRule{profileRule(tt.actionType, sdk.GuardianDecisionAllow)},
+			}))
+
+			decision := policyDecisionForActionType(g, tt.actionType)
+
+			assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+			assert.Equal(t, tt.actionType, decision.Metadata[actionTypeMetadataKey])
+			assert.Contains(t, decision.Reason, "override-hard-block-allow")
+		})
+	}
+}
+
+func TestPolicyOverlayOverrideFallsBackToCurrentHardBlockBehaviorWhenNoRuleMatches(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:                 "override-unrelated",
+		OverrideHardBlocks: true,
+		Rules:              []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+
+	decision := policyDecisionForActionType(g, actionPolicyWrite)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, actionPolicyWrite, decision.Metadata[actionTypeMetadataKey])
+	assert.Equal(t, "policy tampering is blocked", decision.Reason)
+}
+
 func TestBuiltInProfilePolicies(t *testing.T) {
 	tests := []struct {
 		name       string
