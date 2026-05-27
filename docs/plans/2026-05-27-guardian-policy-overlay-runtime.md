@@ -67,13 +67,13 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 3: Apply normal overlays during decisions
-- [ ] introduce internal compiled overlay representation using existing `policyRule` and action-type resolution helpers
-- [ ] update decision evaluation so normal overlays are checked before the active profile
-- [ ] make newest/replaced overlay precedence explicit and deterministic
-- [ ] ensure normal overlays can allow actions the active profile would ask/block and block actions the active profile would allow
-- [ ] write tests for permissive overlay over `ask` and restrictive overlay over `auto`
-- [ ] write tests for overlay precedence when multiple overlays match the same action type
-- [ ] run `go test ./...` - must pass before next task
+- [x] introduce internal compiled overlay representation using existing `policyRule` and action-type resolution helpers
+- [x] update decision evaluation so normal overlays are checked before the active profile
+- [x] make newest/replaced overlay precedence explicit and deterministic
+- [x] ensure normal overlays can allow actions the active profile would ask/block and block actions the active profile would allow
+- [x] write tests for permissive overlay over `ask` and restrictive overlay over `auto`
+- [x] write tests for overlay precedence when multiple overlays match the same action type
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 4: Apply explicit hard-block override semantics
 - [ ] split hard-block evaluation so overlays with `OverrideHardBlocks=true` are evaluated before built-in hard blocks

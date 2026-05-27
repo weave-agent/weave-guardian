@@ -373,6 +373,63 @@ func TestSnapshotPolicyOverlaysCannotMutateGuardianState(t *testing.T) {
 	assert.Equal(t, actionFileWrite, next.Overlays[0].Rules[0].Metadata[actionTypeMetadataKey])
 }
 
+func TestPolicyOverlayAllowsAskProfileAction(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	ok := g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-allow-write",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	})
+	require.True(t, ok)
+
+	decision := policyDecisionForActionType(g, actionFileWrite)
+
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, "ask", decision.Profile)
+	assert.Equal(t, actionFileWrite, decision.Metadata[actionTypeMetadataKey])
+	assert.Contains(t, decision.Reason, "overlay-allow-write")
+}
+
+func TestPolicyOverlayBlocksAutoProfileAction(t *testing.T) {
+	g := New(Config{Profile: "auto"})
+	ok := g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-block-network",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionBlock)},
+	})
+	require.True(t, ok)
+
+	decision := policyDecisionForActionType(g, actionNetworkRead)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "auto", decision.Profile)
+	assert.Equal(t, actionNetworkRead, decision.Metadata[actionTypeMetadataKey])
+	assert.Contains(t, decision.Reason, "overlay-block-network")
+}
+
+func TestPolicyOverlayNewestAndReplacementPrecedence(t *testing.T) {
+	g := New(Config{Profile: "auto"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "older",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionBlock)},
+	}))
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "newer",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionAllow)},
+	}))
+
+	decision := policyDecisionForActionType(g, actionNetworkRead)
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Contains(t, decision.Reason, "newer")
+
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "older",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionAsk)},
+	}))
+
+	decision = policyDecisionForActionType(g, actionNetworkRead)
+	assert.Equal(t, sdk.GuardianDecisionAsk, decision.Action)
+	assert.Contains(t, decision.Reason, "older")
+}
+
 func TestBuiltInProfilePolicies(t *testing.T) {
 	tests := []struct {
 		name       string
