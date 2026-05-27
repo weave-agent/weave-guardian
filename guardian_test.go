@@ -510,6 +510,177 @@ func TestPolicyOverlayOverrideFallsBackToCurrentHardBlockBehaviorWhenNoRuleMatch
 	assert.Equal(t, "policy tampering is blocked", decision.Reason)
 }
 
+func TestPolicyOverlayAskDecisionUsesApprovalFlow(t *testing.T) {
+	g := New(Config{Profile: "auto", ApprovalTimeout: "1s"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:     "overlay-ask-write",
+		Source: "test-extension",
+		Rules: []sdk.GuardianProfileRule{
+			{
+				Decision: sdk.GuardianDecisionAsk,
+				Reason:   "overlay requires write approval",
+				Metadata: map[string]any{actionTypeMetadataKey: actionFileWrite},
+			},
+		},
+	}))
+
+	bus := newStubBus()
+	approvalRequests := 0
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		approvalRequests++
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		assert.Equal(t, "req-overlay-ask", payload.Approval.DecisionID)
+		assert.Equal(t, "overlay requires write approval", payload.Approval.Reason)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeOnce,
+			Reason: "overlay ask approved",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-ask",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, "overlay ask approved", decision.Reason)
+	assert.Equal(t, "auto", decision.Profile)
+	assert.Equal(t, actionFileWrite, decision.Metadata[actionTypeMetadataKey])
+	assert.Equal(t, "overlay-ask-write", decision.Metadata[overlayIDMetadataKey])
+	assert.Equal(t, "test-extension", decision.Metadata[overlaySrcMetadataKey])
+	assert.Equal(t, 1, approvalRequests)
+	assertPublishedDecision(t, bus, "req-overlay-ask", sdk.GuardianDecisionAllow)
+}
+
+func TestSessionGrantMatchesFutureOverlayAskDecision(t *testing.T) {
+	g := New(Config{Profile: "auto", ApprovalTimeout: "1s"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-session-ask",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAsk)},
+	}))
+
+	bus := newStubBus()
+	approvalRequests := 0
+	workingDir := t.TempDir()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		approvalRequests++
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeSession,
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	first, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-grant-first",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "one.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, first.Action)
+
+	second, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-grant-second",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "two.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionAllow, second.Action)
+	assert.NotEmpty(t, second.MatchedGrantID)
+	assert.Equal(t, "overlay-session-ask", second.Metadata[overlayIDMetadataKey])
+	assert.Equal(t, 1, approvalRequests)
+}
+
+func TestSessionGrantDoesNotBypassBlockingOverlay(t *testing.T) {
+	g := New(Config{Profile: "auto", ApprovalTimeout: "1s"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-replaced",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAsk)},
+	}))
+
+	bus := newStubBus()
+	workingDir := t.TempDir()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeSession,
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	first, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-blocking-grant-first",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "one.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, first.Action)
+	require.NotEmpty(t, first.Metadata[overlayIDMetadataKey])
+
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-replaced",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionBlock)},
+	}))
+
+	second, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-blocking-grant-second",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "two.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionBlock, second.Action)
+	assert.Empty(t, second.MatchedGrantID)
+	assert.Equal(t, "overlay-replaced", second.Metadata[overlayIDMetadataKey])
+}
+
+func TestPublishedDecisionIncludesOverlayMetadata(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:     "overlay-metadata",
+		Source: "metadata-source",
+		Rules:  []sdk.GuardianProfileRule{profileRule(actionFileWrite, sdk.GuardianDecisionAllow)},
+	}))
+	bus := newStubBus()
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-overlay-metadata",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	var published sdk.GuardianDecision
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			payload, ok := ev.Payload.(sdk.GuardianDecision)
+			if ev.Topic == sdk.GuardianDecisionTopic && ok && payload.RequestID == "req-overlay-metadata" {
+				published = payload
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+
+	assert.Equal(t, "ask", published.Profile)
+	assert.Equal(t, actionFileWrite, published.Metadata[actionTypeMetadataKey])
+	assert.Equal(t, "overlay-metadata", published.Metadata[overlayIDMetadataKey])
+	assert.Equal(t, "metadata-source", published.Metadata[overlaySrcMetadataKey])
+}
+
 func TestBuiltInProfilePolicies(t *testing.T) {
 	tests := []struct {
 		name       string

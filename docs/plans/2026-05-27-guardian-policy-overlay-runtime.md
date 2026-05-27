@@ -84,12 +84,12 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 5: Preserve grants, approvals, and decision metadata behavior
-- [ ] ensure overlay-produced `ask` decisions still create approvals and can be resolved through existing approval flow
-- [ ] ensure grants continue to match future ask decisions without bypassing active overlays unexpectedly
-- [ ] ensure published `GuardianDecision` includes the selected profile plus metadata indicating matched overlay ID/source when an overlay decides
-- [ ] write tests for overlay ask approval flow
-- [ ] write tests for decision metadata with matched overlay information
-- [ ] run `go test ./...` - must pass before next task
+- [x] ensure overlay-produced `ask` decisions still create approvals and can be resolved through existing approval flow
+- [x] ensure grants continue to match future ask decisions without bypassing active overlays unexpectedly
+- [x] ensure published `GuardianDecision` includes the selected profile plus metadata indicating matched overlay ID/source when an overlay decides
+- [x] write tests for overlay ask approval flow
+- [x] write tests for decision metadata with matched overlay information
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 - [ ] verify push/pop event handling is session-only and does not mutate config files

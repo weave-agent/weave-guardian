@@ -25,6 +25,8 @@ const (
 
 	actionTypeMetadataKey = "action_type"
 	profileMetadataKey    = "profile"
+	overlayIDMetadataKey  = "overlay_id"
+	overlaySrcMetadataKey = "overlay_source"
 	stageActionTypesKey   = "stage_action_types"
 	compositionActionKey  = "composition_action_type"
 
@@ -56,6 +58,13 @@ type policyProfile struct {
 type policyRule struct {
 	decision sdk.GuardianDecisionAction
 	reason   string
+}
+
+type selectedPolicyRule struct {
+	actionType string
+	rule       policyRule
+	overlayID  string
+	source     string
 }
 
 type policyOverlay struct {
@@ -423,22 +432,29 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	overlays := g.orderedPolicyOverlaysLocked()
 	g.mu.Unlock()
 
-	actionType := ""
-	rule := policyRule{
-		decision: sdk.GuardianDecisionAllow,
-		reason:   "all stages allowed",
+	selected := selectedPolicyRule{
+		rule: policyRule{
+			decision: sdk.GuardianDecisionAllow,
+			reason:   "all stages allowed",
+		},
 	}
 	for _, candidateType := range actionTypes {
 		candidateRule, ok := profile.rules[candidateType]
-		if overlayRule, overlay := policyOverlayRule(overlays, candidateType, true); overlay {
+		candidateOverlayID := ""
+		candidateOverlaySource := ""
+		if overlayRule, overlay, matched := policyOverlayRule(overlays, candidateType, true); matched {
 			candidateRule = overlayRule
 			ok = true
+			candidateOverlayID = overlay.overlay.ID
+			candidateOverlaySource = overlay.overlay.Source
 		} else if hardRule, hard := profileHardBlockRule(profileName, candidateType); hard {
 			candidateRule = hardRule
 			ok = true
-		} else if overlayRule, overlay := policyOverlayRule(overlays, candidateType, false); overlay {
+		} else if overlayRule, overlay, matched := policyOverlayRule(overlays, candidateType, false); matched {
 			candidateRule = overlayRule
 			ok = true
+			candidateOverlayID = overlay.overlay.ID
+			candidateOverlaySource = overlay.overlay.Source
 		}
 		if !ok {
 			decision := sdk.GuardianDecisionBlock
@@ -450,14 +466,22 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 				reason:   fmt.Sprintf("%s has no policy rule in profile %s", candidateType, profile.name),
 			}
 		}
-		if shouldUseDecision(candidateType, candidateRule, actionType, rule) {
-			actionType = candidateType
-			rule = candidateRule
+		if shouldUseDecision(candidateType, candidateRule, selected.actionType, selected.rule) {
+			selected = selectedPolicyRule{
+				actionType: candidateType,
+				rule:       candidateRule,
+				overlayID:  candidateOverlayID,
+				source:     candidateOverlaySource,
+			}
 		}
 	}
 
 	metadata := map[string]any{
-		actionTypeMetadataKey: actionType,
+		actionTypeMetadataKey: selected.actionType,
+	}
+	if selected.overlayID != "" {
+		metadata[overlayIDMetadataKey] = selected.overlayID
+		metadata[overlaySrcMetadataKey] = selected.source
 	}
 	if req.Action == sdk.GuardianActionExec {
 		if len(classification.StageActionTypes) > 0 {
@@ -471,8 +495,8 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	return sdk.GuardianDecision{
 		ID:        req.ID,
 		RequestID: req.ID,
-		Action:    rule.decision,
-		Reason:    rule.reason,
+		Action:    selected.rule.decision,
+		Reason:    selected.rule.reason,
 		Profile:   profileName,
 		Metadata:  metadata,
 	}
@@ -489,7 +513,7 @@ func (g *Guardian) orderedPolicyOverlaysLocked() []policyOverlay {
 	return overlays
 }
 
-func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, bool) {
+func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
 	for i := len(overlays) - 1; i >= 0; i-- {
 		overlay := overlays[i]
 		if overlay.overlay.OverrideHardBlocks != overrideHardBlocks {
@@ -497,10 +521,10 @@ func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHard
 		}
 		rule, ok := overlay.rules[actionType]
 		if ok {
-			return rule, true
+			return rule, overlay, true
 		}
 	}
-	return policyRule{}, false
+	return policyRule{}, policyOverlay{}, false
 }
 
 func resolveProfiles(custom map[string]sdk.GuardianProfile) map[string]policyProfile {
