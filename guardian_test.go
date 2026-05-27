@@ -524,6 +524,21 @@ func TestPolicyOverlayBlocksAutoProfileAction(t *testing.T) {
 	assert.Contains(t, decision.Reason, "overlay-block-network")
 }
 
+func TestPolicyOverlayBlocksYoloHardBlockAction(t *testing.T) {
+	g := New(Config{Profile: "yolo"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-block-policy-write",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionPolicyWrite, sdk.GuardianDecisionBlock)},
+	}))
+
+	decision := policyDecisionForActionType(g, actionPolicyWrite)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "yolo", decision.Profile)
+	assert.Equal(t, actionPolicyWrite, decision.Metadata[actionTypeMetadataKey])
+	assert.Equal(t, "overlay-block-policy-write", decision.Metadata[overlayIDMetadataKey])
+}
+
 func TestPolicyOverlayNewestAndReplacementPrecedence(t *testing.T) {
 	g := New(Config{Profile: "auto"})
 	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
@@ -1716,6 +1731,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{
+			name:     "aws s3 upload with trailing profile writes remote",
+			command:  "aws s3 cp artifact.txt s3://example-bucket/artifact.txt --profile prod",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
 			name:     "aws s3 download reads remote",
 			command:  "aws s3 cp s3://example-bucket/artifact.txt artifact.txt",
 			wantType: actionNetworkRead,
@@ -1724,6 +1745,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 		{
 			name:     "gcloud storage upload writes remote",
 			command:  "gcloud storage cp artifact.txt gs://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "gcloud storage upload with leading project writes remote",
+			command:  "gcloud storage cp --project prod artifact.txt gs://example-bucket/artifact.txt",
 			wantType: actionNetworkWrite,
 			want:     sdk.GuardianDecisionAsk,
 		},

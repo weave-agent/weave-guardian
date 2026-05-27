@@ -748,12 +748,74 @@ func classifyGCloudCommand(args, lowerArgs []string) string {
 }
 
 func cloudCopyWritesRemote(args []string) bool {
-	paths := shellPathArgs(args)
-	if len(paths) == 0 {
+	operands := cloudCopyOperands(args)
+	if len(operands) < 2 {
 		return false
 	}
-	dst := paths[len(paths)-1]
+	dst := operands[1]
 	return strings.Contains(dst, "://") || strings.HasPrefix(dst, "s3://") || strings.HasPrefix(dst, "gs://")
+}
+
+func cloudCopyOperands(args []string) []string {
+	out := make([]string, 0, 2)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == shellOptionTerminator {
+			for _, operand := range args[i+1:] {
+				out = append(out, operand)
+				if len(out) == 2 {
+					return out
+				}
+			}
+			return out
+		}
+		if strings.HasPrefix(arg, "-") {
+			if cloudCopyOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		out = append(out, arg)
+		if len(out) == 2 {
+			return out
+		}
+	}
+	return out
+}
+
+func cloudCopyOptionTakesValue(arg string) bool {
+	name, _, _ := strings.Cut(strings.ToLower(arg), "=")
+	switch name {
+	case
+		"--acl",
+		"--billing-project",
+		"--cache-control",
+		"--content-disposition",
+		"--content-encoding",
+		"--content-language",
+		"--content-type",
+		"--decryption-keys",
+		"--encryption-key",
+		"--endpoint-url",
+		"--exclude",
+		"--expires",
+		"--include",
+		"--kms-key",
+		"--metadata",
+		"--profile",
+		"--project",
+		"--read-paths-from-stdin",
+		"--region",
+		"--source-region",
+		"--storage-class",
+		"--sse",
+		"--sse-c",
+		"--sse-c-copy-source",
+		"--sse-kms-key-id":
+		return true
+	default:
+		return false
+	}
 }
 
 func classifyNetworkToolCommand(name string, args []string) string {

@@ -1303,12 +1303,12 @@ func hardBlockRule(actionType string) (policyRule, bool) {
 }
 
 func profileHardBlockRule(profileName, actionType string) (policyRule, bool) {
+	if profileName == yoloProfile {
+		return policyRule{}, false
+	}
 	rule, ok := hardBlockRule(actionType)
 	if !ok {
 		return policyRule{}, false
-	}
-	if profileName == yoloProfile {
-		return allowRule(rule.reason), true
 	}
 	if profileCanApproveHardCommand(profileName, actionType) {
 		return askRule(hardCommandApprovalReason(actionType, rule.reason)), true
