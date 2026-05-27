@@ -566,10 +566,16 @@ func TestFileActionClassifier(t *testing.T) {
 			wantType: actionPolicyWrite,
 		},
 		{
-			name:     "extension policy delete is policy tampering",
+			name:     "extension policy delete is normal delete",
 			action:   sdk.GuardianActionDelete,
 			path:     filepath.Join(projectDir, ".weave", "extensions", "tool", "policy.yaml"),
-			wantType: actionPolicyWrite,
+			wantType: actionFileDelete,
+		},
+		{
+			name:     "extension source write is normal write",
+			action:   sdk.GuardianActionWrite,
+			path:     filepath.Join(projectDir, ".weave", "extensions", "tool", "tool.go"),
+			wantType: actionFileWrite,
 		},
 		{
 			name:     "git internals write is protected",
@@ -650,7 +656,7 @@ func TestFileActionClassifierResolvesSymlinks(t *testing.T) {
 
 func TestFileActionClassifierResolvesExistingSymlinkParents(t *testing.T) {
 	projectDir := t.TempDir()
-	realWeave := filepath.Join(projectDir, "real-weave")
+	realWeave := filepath.Join(projectDir, ".weave")
 	require.NoError(t, os.MkdirAll(filepath.Join(realWeave, "extensions", "tool"), 0o755))
 
 	link := filepath.Join(projectDir, "linked-weave")
@@ -663,7 +669,7 @@ func TestFileActionClassifierResolvesExistingSymlinkParents(t *testing.T) {
 		WorkingDir: projectDir,
 	}
 
-	assert.Equal(t, actionPolicyWrite, classifyRequest(req))
+	assert.Equal(t, actionFileWrite, classifyRequest(req))
 }
 
 func TestDecideUsesFileClassifierWhenMetadataIsAbsent(t *testing.T) {

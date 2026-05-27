@@ -191,13 +191,13 @@ func isPolicyPath(path classifiedPath) bool {
 		return false
 	}
 
+	if isWeaveExtensionsPath(path.parts) {
+		return false
+	}
 	if hasAnyPathSegment(path.parts, "guardian", "sandbox") && isConfigOrPolicyFile(path.base) {
 		return true
 	}
 	if hasPathSuffix(path.parts, ".weave", "settings.json") || hasPathSuffix(path.parts, ".weave", "config.json") {
-		return true
-	}
-	if hasPathSuffix(path.parts, ".weave", "extensions", "guardian") || hasPathSuffix(path.parts, ".weave", "extensions", "sandbox") {
 		return true
 	}
 	if slices.Contains(path.parts, "extensions") && isConfigOrPolicyFile(path.base) {
@@ -215,7 +215,10 @@ func isProtectedPath(path classifiedPath) bool {
 		return false
 	}
 
-	if slices.Contains(path.parts, ".git") || slices.Contains(path.parts, ".weave") {
+	if slices.Contains(path.parts, ".git") {
+		return true
+	}
+	if slices.Contains(path.parts, ".weave") && !isWeaveExtensionsPath(path.parts) {
 		return true
 	}
 	if hasPathSuffix(path.parts, ".config", "weave") {
@@ -243,6 +246,15 @@ func isWindowsProtectedPath(resolved string) bool {
 	}
 	for _, root := range protectedRoots {
 		if resolved == root || strings.HasPrefix(resolved, strings.TrimRight(root, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func isWeaveExtensionsPath(parts []string) bool {
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] == ".weave" && parts[i+1] == "extensions" {
 			return true
 		}
 	}
