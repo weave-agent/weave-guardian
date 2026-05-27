@@ -770,22 +770,16 @@ func cloudCopyWritesRemote(args []string) bool {
 	if len(operands) < 2 {
 		return false
 	}
-	dst := operands[1]
+	dst := operands[len(operands)-1]
 	return strings.Contains(dst, "://") || strings.HasPrefix(dst, "s3://") || strings.HasPrefix(dst, "gs://")
 }
 
 func cloudCopyOperands(args []string) []string {
-	out := make([]string, 0, 2)
+	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == shellOptionTerminator {
-			for _, operand := range args[i+1:] {
-				out = append(out, operand)
-				if len(out) == 2 {
-					return out
-				}
-			}
-			return out
+			return append(out, args[i+1:]...)
 		}
 		if strings.HasPrefix(arg, "-") {
 			if cloudCopyOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
@@ -794,9 +788,6 @@ func cloudCopyOperands(args []string) []string {
 			continue
 		}
 		out = append(out, arg)
-		if len(out) == 2 {
-			return out
-		}
 	}
 	return out
 }

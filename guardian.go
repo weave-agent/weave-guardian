@@ -436,10 +436,8 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 			reason:   "all stages allowed",
 		},
 	}
-	if overrideSelected, ok := selectPolicyOverlayRule(overlays, actionTypes, true); ok {
-		selected = overrideSelected
-	} else if hardSelected, ok := selectHardBlockRule(profileName, actionTypes); ok {
-		selected = hardSelected
+	if overrideOrHardSelected, ok := selectOverrideOrHardBlockRule(overlays, profileName, actionTypes); ok {
+		selected = overrideOrHardSelected
 	} else if normalSelected, ok := selectPolicyOverlayRule(overlays, actionTypes, false); ok {
 		selected = normalSelected
 	} else {
@@ -505,18 +503,28 @@ func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHard
 	return policyRule{}, policyOverlay{}, false
 }
 
-func selectHardBlockRule(profileName string, actionTypes []string) (selectedPolicyRule, bool) {
+func selectOverrideOrHardBlockRule(overlays []policyOverlay, profileName string, actionTypes []string) (selectedPolicyRule, bool) {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		rule, ok := profileHardBlockRule(profileName, candidateType)
-		if !ok {
-			continue
+		rule, overlay, ok := policyOverlayRule(overlays, candidateType, true)
+		candidate := selectedPolicyRule{
+			actionType: candidateType,
+			rule:       rule,
+			overlayID:  overlay.overlay.ID,
+			source:     overlay.overlay.Source,
 		}
-		if shouldUseDecision(candidateType, rule, selected.actionType, selected.rule) {
-			selected = selectedPolicyRule{
+		if !ok {
+			rule, ok = profileHardBlockRule(profileName, candidateType)
+			if !ok {
+				continue
+			}
+			candidate = selectedPolicyRule{
 				actionType: candidateType,
 				rule:       rule,
 			}
+		}
+		if shouldUseDecision(candidate.actionType, candidate.rule, selected.actionType, selected.rule) {
+			selected = candidate
 		}
 	}
 	return selected, selected.actionType != ""
@@ -525,25 +533,31 @@ func selectHardBlockRule(profileName string, actionTypes []string) (selectedPoli
 func selectProfilePolicyRule(profile policyProfile, actionTypes []string, askFallback bool) selectedPolicyRule {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		rule, ok := profile.rules[candidateType]
-		if !ok {
-			decision := sdk.GuardianDecisionBlock
-			if askFallback {
-				decision = sdk.GuardianDecisionAsk
-			}
-			rule = policyRule{
-				decision: decision,
-				reason:   fmt.Sprintf("%s has no policy rule in profile %s", candidateType, profile.name),
-			}
-		}
+		candidate := profilePolicyRule(profile, candidateType, askFallback)
+		rule := candidate.rule
 		if shouldUseDecision(candidateType, rule, selected.actionType, selected.rule) {
-			selected = selectedPolicyRule{
-				actionType: candidateType,
-				rule:       rule,
-			}
+			selected = candidate
 		}
 	}
 	return selected
+}
+
+func profilePolicyRule(profile policyProfile, actionType string, askFallback bool) selectedPolicyRule {
+	rule, ok := profile.rules[actionType]
+	if !ok {
+		decision := sdk.GuardianDecisionBlock
+		if askFallback {
+			decision = sdk.GuardianDecisionAsk
+		}
+		rule = policyRule{
+			decision: decision,
+			reason:   fmt.Sprintf("%s has no policy rule in profile %s", actionType, profile.name),
+		}
+	}
+	return selectedPolicyRule{
+		actionType: actionType,
+		rule:       rule,
+	}
 }
 
 func resolveProfiles(custom map[string]sdk.GuardianProfile) map[string]policyProfile {
