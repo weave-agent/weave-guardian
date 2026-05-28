@@ -85,6 +85,8 @@ type Guardian struct {
 	headless        bool
 	approvalTimeout time.Duration
 
+	persistMu sync.Mutex
+
 	mu       sync.Mutex
 	pending  map[string]*pendingApproval
 	grants   []sdk.GuardianGrant
@@ -471,17 +473,32 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 				overlayID:  overlay.overlay.ID,
 				source:     overlay.overlay.Source,
 			}
-			return guardianDecisionFromSelectedRule(req, profileName, selected, classification)
 		}
 	}
 	for _, actionType := range actionTypes {
 		candidate := selectPolicyRuleForActionType(req, overlays, profileName, profile, actionType, g.cfg.AskFallback)
+		if compositionOverrideCoversCandidate(classification.CompositionActionType, selected, candidate) {
+			continue
+		}
 		if shouldUseDecision(candidate.actionType, candidate.rule, selected.actionType, selected.rule) {
 			selected = candidate
 		}
 	}
 
 	return guardianDecisionFromSelectedRule(req, profileName, selected, classification)
+}
+
+func compositionOverrideCoversCandidate(compositionActionType string, selected, candidate selectedPolicyRule) bool {
+	if compositionActionType == "" || selected.actionType != compositionActionType || selected.overlayID == "" {
+		return false
+	}
+	if selected.rule.decision != sdk.GuardianDecisionAllow || candidate.actionType == compositionActionType {
+		return false
+	}
+	if candidate.overlayID != "" {
+		return false
+	}
+	return !isHardBlockActionType(candidate.actionType)
 }
 
 func guardianDecisionFromSelectedRule(
@@ -1042,6 +1059,14 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 }
 
 func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sdk.GuardianDecision, resolution sdk.GuardianResolution) {
+	rule, ok := buildProfileRuleFromApproval(approval, decision, resolution)
+	if !ok {
+		return
+	}
+
+	g.persistMu.Lock()
+	defer g.persistMu.Unlock()
+
 	g.mu.Lock()
 	targetProfile := decision.Profile
 	if targetProfile == "" {
@@ -1050,13 +1075,9 @@ func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sd
 	updated := cloneGuardianConfig(g.cfg)
 	g.mu.Unlock()
 
-	rule, ok := buildProfileRuleFromApproval(approval, decision, resolution)
-	if !ok {
-		return
-	}
 	appendProfileRule(&updated, targetProfile, rule)
 
-	if err := g.configWriter.SaveExtensionConfig(extensionName, extensionName, updated); err != nil {
+	if err := g.configWriter.SaveExtensionConfig(extensionName, extensionName, profileRulePatch(targetProfile, updated.Profiles[targetProfile])); err != nil {
 		return
 	}
 
@@ -1065,6 +1086,22 @@ func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sd
 	g.profiles = resolveProfiles(updated.Profiles)
 	g.mu.Unlock()
 	g.publishSnapshot()
+}
+
+func profileRulePatch(profileName string, profile sdk.GuardianProfile) map[string]any {
+	profile = cloneGuardianProfile(profile)
+	profilePatch := map[string]any{
+		"rules": profile.Rules,
+	}
+	if isBuiltInProfileName(profileName) {
+		profilePatch["name"] = profile.Name
+		profilePatch["metadata"] = maps.Clone(profile.Metadata)
+	}
+	return map[string]any{
+		"profiles": map[string]any{
+			profileName: profilePatch,
+		},
+	}
 }
 
 func appendProfileRule(cfg *Config, profileName string, rule sdk.GuardianProfileRule) {
@@ -1689,6 +1726,11 @@ func hardBlockRule(actionType string) (policyRule, bool) {
 	}
 
 	return blockRule(reason), true
+}
+
+func isHardBlockActionType(actionType string) bool {
+	_, ok := hardBlockReasons()[actionType]
+	return ok
 }
 
 func profileHardBlockRule(profileName, actionType string) (policyRule, bool) {
