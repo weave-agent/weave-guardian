@@ -2058,6 +2058,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{
+			name:     "aws s3 upload from stdin writes remote",
+			command:  "aws s3 cp - s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
 			name:     "aws s3 download reads remote",
 			command:  "aws s3 cp s3://example-bucket/artifact.txt artifact.txt",
 			wantType: actionNetworkRead,
@@ -2108,6 +2114,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 		{
 			name:     "gcloud storage upload with trailing account writes remote",
 			command:  "gcloud storage cp artifact.txt gs://example-bucket/artifact.txt --account deploy@example.com",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "gcloud storage upload from stdin writes remote",
+			command:  "gcloud storage cp - gs://example-bucket/artifact.txt",
 			wantType: actionNetworkWrite,
 			want:     sdk.GuardianDecisionAsk,
 		},
@@ -3172,6 +3184,19 @@ func TestBuildProfileRuleFromApprovalMapsRuleScopes(t *testing.T) {
 			},
 		},
 		{
+			name: "command prefix with leading value flag",
+			request: sdk.GuardianRequest{
+				Action:     sdk.GuardianActionExec,
+				Command:    "git -C repo checkout feature",
+				WorkingDir: workingDir,
+			},
+			actionType: actionGitWrite,
+			ruleScope:  sdk.GuardianProfileRuleScopeCommandPrefix,
+			wantMetadata: map[string]any{
+				grantCommandPrefixKey: "git -C repo checkout",
+			},
+		},
+		{
 			name: "command family",
 			request: sdk.GuardianRequest{
 				Action:     sdk.GuardianActionExec,
@@ -3491,6 +3516,40 @@ func TestConstrainedSavedCommandRuleDoesNotAllowUnrelatedCommandsOrWorkingDirs(t
 	})
 	assert.Equal(t, sdk.GuardianDecisionAsk, otherDir.Action)
 	assert.Equal(t, "package installs require approval", otherDir.Reason)
+}
+
+func TestConstrainedSavedCommandPrefixRuleMatchesCanonicalCommand(t *testing.T) {
+	g := New(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved git checkout",
+					Metadata: constrainedRuleMetadata(actionGitWrite, map[string]any{
+						grantCommandPrefixKey: "git -C repo checkout",
+					}),
+				}},
+			},
+		},
+	})
+
+	allowed := g.policyDecision(sdk.GuardianRequest{
+		ID:      "req-saved-command-prefix-allowed",
+		Action:  sdk.GuardianActionExec,
+		Command: "git -C repo checkout feature",
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+	assert.Equal(t, "saved git checkout", allowed.Reason)
+
+	unrelated := g.policyDecision(sdk.GuardianRequest{
+		ID:      "req-saved-command-prefix-unrelated",
+		Action:  sdk.GuardianActionExec,
+		Command: "git -C repo commit -m change",
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
+	assert.Equal(t, "git write operations require approval", unrelated.Reason)
 }
 
 func TestConstrainedSavedNetworkRuleDoesNotAllowUnrelatedHosts(t *testing.T) {

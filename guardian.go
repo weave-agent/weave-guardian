@@ -30,17 +30,18 @@ const (
 	stageActionTypesKey   = "stage_action_types"
 	compositionActionKey  = "composition_action_type"
 
-	grantConstraintsVersionKey = "grant_constraints_version"
-	grantConstraintsVersion    = "v1"
-	grantActionTypeKey         = "grant_action_type"
-	grantProfileKey            = "grant_profile"
-	grantWorkingDirKey         = "grant_working_dir"
-	grantPathPrefixKey         = "grant_path_prefix"
-	grantPathExactKey          = "grant_path_exact"
-	grantCommandExactKey       = "grant_command_exact"
-	grantCommandPrefixKey      = "grant_command_prefix"
-	grantCommandFamilyKey      = "grant_command_family"
-	grantNetworkHostKey        = "grant_network_host"
+	grantConstraintsVersionKey  = "grant_constraints_version"
+	grantConstraintsVersion     = "v1"
+	grantActionTypeKey          = "grant_action_type"
+	grantProfileKey             = "grant_profile"
+	grantWorkingDirKey          = "grant_working_dir"
+	grantPathPrefixKey          = "grant_path_prefix"
+	grantPathExactKey           = "grant_path_exact"
+	grantCommandExactKey        = "grant_command_exact"
+	grantCommandPrefixKey       = "grant_command_prefix"
+	grantCommandFamilyKey       = "grant_command_family"
+	grantNetworkHostKey         = "grant_network_host"
+	requestCommandNormalizedKey = "request_command_normalized"
 )
 
 // Config holds guardian extension settings.
@@ -1274,15 +1275,7 @@ func commandPrefixForProfileRule(req sdk.GuardianRequest, decision sdk.GuardianD
 		return normalizedExactCommand(req.Command)
 	}
 
-	parts := []string{normalizedCommandName(stage.Tokens[0])}
-	for _, token := range stage.Tokens[1:] {
-		if strings.HasPrefix(token, "-") {
-			continue
-		}
-		parts = append(parts, token)
-		break
-	}
-	return strings.Join(parts, " ")
+	return commandPrefixFromShellStage(stage)
 }
 
 func profileRuleNetworkHost(req sdk.GuardianRequest, decision sdk.GuardianDecision) string {
@@ -1364,7 +1357,7 @@ func grantConstraintMetadataMatchesRequest(grantMetadata, requestConstraints map
 		return false
 	}
 	if prefix := metadataString(grantMetadata, grantCommandPrefixKey); prefix != "" {
-		requestCommand := metadataString(requestConstraints, grantCommandExactKey)
+		requestCommand := metadataString(requestConstraints, requestCommandNormalizedKey, grantCommandExactKey)
 		if requestCommand != prefix && !strings.HasPrefix(requestCommand, prefix+" ") {
 			return false
 		}
@@ -1415,6 +1408,7 @@ func addExecGrantConstraints(constraints map[string]any, req sdk.GuardianRequest
 	}
 	if len(stage.Tokens) > 0 {
 		constraints[grantCommandFamilyKey] = normalizedCommandName(stage.Tokens[0])
+		constraints[requestCommandNormalizedKey] = normalizedShellStageCommand(stage)
 	}
 	if actionType == actionNetworkRead || actionType == actionNetworkWrite {
 		if host := shellStageNetworkHost(stage); host != "" {
@@ -1429,6 +1423,35 @@ func addExecGrantConstraints(constraints map[string]any, req sdk.GuardianRequest
 			constraints[grantPathPrefixKey] = filepath.Dir(path)
 		}
 	}
+}
+
+func normalizedShellStageCommand(stage shellStage) string {
+	if len(stage.Tokens) == 0 {
+		return ""
+	}
+	tokens := append([]string{normalizedCommandName(stage.Tokens[0])}, stage.Tokens[1:]...)
+	return strings.Join(tokens, " ")
+}
+
+func commandPrefixFromShellStage(stage shellStage) string {
+	if len(stage.Tokens) == 0 {
+		return ""
+	}
+
+	prefix := []string{normalizedCommandName(stage.Tokens[0])}
+	for i := 1; i < len(stage.Tokens); i++ {
+		token := stage.Tokens[i]
+		prefix = append(prefix, token)
+		if !strings.HasPrefix(token, "-") {
+			break
+		}
+		if strings.Contains(token, "=") || i+1 >= len(stage.Tokens) {
+			continue
+		}
+		i++
+		prefix = append(prefix, stage.Tokens[i])
+	}
+	return strings.Join(prefix, " ")
 }
 
 func selectedShellStage(command, workingDir, actionType string) (shellStage, bool) {

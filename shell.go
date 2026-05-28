@@ -781,6 +781,10 @@ func cloudCopyOperands(args []string) []string {
 		if arg == shellOptionTerminator {
 			return append(out, args[i+1:]...)
 		}
+		if arg == "-" {
+			out = append(out, arg)
+			continue
+		}
 		if strings.HasPrefix(arg, "-") {
 			if cloudOptionTakesValue(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
 				i++
