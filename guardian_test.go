@@ -594,6 +594,23 @@ func TestPolicyOverlayBlocksAutoProfileAction(t *testing.T) {
 	assert.Contains(t, decision.Reason, "overlay-block-network")
 }
 
+func TestPolicyOverlayAllowDoesNotBypassProfileRuleForOtherStage(t *testing.T) {
+	g := New(Config{Profile: "ask"})
+	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
+		ID:    "overlay-allow-network",
+		Rules: []sdk.GuardianProfileRule{profileRule(actionNetworkRead, sdk.GuardianDecisionAllow)},
+	}))
+
+	decision := g.policyDecisionForActionTypes(sdk.GuardianRequest{
+		ID:     "req-overlay-multistage",
+		Action: sdk.GuardianActionExec,
+	}, []string{actionNetworkRead, actionPackageInstall})
+
+	assert.Equal(t, sdk.GuardianDecisionAsk, decision.Action)
+	assert.Equal(t, actionPackageInstall, decision.Metadata[actionTypeMetadataKey])
+	assert.NotContains(t, decision.Metadata, overlayIDMetadataKey)
+}
+
 func TestPolicyOverlayBlocksYoloHardBlockAction(t *testing.T) {
 	g := New(Config{Profile: "yolo"})
 	require.True(t, g.pushPolicyOverlay(sdk.GuardianPolicyOverlay{
@@ -1240,6 +1257,30 @@ func TestCustomProfileCannotOverrideHardBlocks(t *testing.T) {
 
 	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
 	assert.Equal(t, actionPolicyWrite, decision.Metadata[actionTypeMetadataKey])
+}
+
+func TestCustomProfileCanPersistBlockForApprovableHardBlock(t *testing.T) {
+	g := New(Config{
+		Profile: "ask",
+		Profiles: map[string]sdk.GuardianProfile{
+			"ask": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionBlock,
+					Reason:   "saved remote exec deny",
+					Metadata: map[string]any{
+						grantConstraintsVersionKey: grantConstraintsVersion,
+						grantActionTypeKey:         actionCommandExecRemote,
+					},
+				}},
+			},
+		},
+	})
+
+	decision := policyDecisionForActionType(g, actionCommandExecRemote)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "saved remote exec deny", decision.Reason)
 }
 
 func TestBuiltInAskProfileConfigAddsConstrainedRules(t *testing.T) {
@@ -2694,6 +2735,51 @@ func TestProfileApprovalPersistsRuleToConfigWriter(t *testing.T) {
 	assertPublishedSnapshot(t, bus)
 }
 
+func TestProfileApprovalPersistsToDecisionProfileAfterProfileChange(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{
+		Profile:         "team",
+		ApprovalTimeout: "1s",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Name:     "team",
+				Metadata: map[string]any{"extends": "ask"},
+			},
+		},
+	}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		bus.Publish(sdk.NewEvent(sdk.GuardianProfileChangeTopic, sdk.GuardianProfileChange{
+			CurrentProfile: "auto",
+		}))
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action:    sdk.GuardianResolutionAllow,
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+			Reason:    "persist to original profile",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	workingDir := t.TempDir()
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-profile-save-after-change",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	saved, ok := writer.savedExtensionTarget.(Config)
+	require.True(t, ok)
+	require.Contains(t, saved.Profiles, "team")
+	assert.NotContains(t, saved.Profiles, "auto")
+	require.Len(t, saved.Profiles["team"].Rules, 1)
+	assert.Equal(t, "persist to original profile", saved.Profiles["team"].Rules[0].Reason)
+}
+
 func TestProfileDenyPersistsBlockRuleToConfigWriter(t *testing.T) {
 	writer := &configStub{}
 	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
@@ -3384,6 +3470,35 @@ func TestConstrainedSavedNetworkRuleDoesNotAllowUnrelatedHosts(t *testing.T) {
 	})
 	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
 	assert.Equal(t, "network reads require approval", unrelated.Reason)
+}
+
+func TestConstrainedSavedRuleIndexesGrantActionTypeWithoutLegacyActionType(t *testing.T) {
+	g := New(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved grant action host",
+					Metadata: map[string]any{
+						grantConstraintsVersionKey: grantConstraintsVersion,
+						grantActionTypeKey:         actionNetworkRead,
+						grantNetworkHostKey:        "api.example.com",
+					},
+				}},
+			},
+		},
+	})
+
+	decision := g.policyDecision(sdk.GuardianRequest{
+		ID:       "req-saved-grant-action-network",
+		Action:   sdk.GuardianActionNetwork,
+		Metadata: map[string]any{"url": "https://api.example.com/releases"},
+	})
+
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, "saved grant action host", decision.Reason)
 }
 
 func TestSavedBroadActionTypeRuleAllowsMatchingActionType(t *testing.T) {

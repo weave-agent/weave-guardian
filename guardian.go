@@ -463,14 +463,33 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 			reason:   "all stages allowed",
 		},
 	}
-	if overrideOrHardSelected, ok := selectOverrideOrHardBlockRule(req, overlays, profileName, actionTypes); ok {
-		selected = overrideOrHardSelected
-	} else if normalSelected, ok := selectPolicyOverlayRule(req, overlays, actionTypes, false); ok {
-		selected = normalSelected
-	} else {
-		selected = selectProfilePolicyRule(req, profile, actionTypes, g.cfg.AskFallback)
+	if classification.CompositionActionType != "" {
+		if rule, overlay, ok := policyOverlayRule(req, overlays, classification.CompositionActionType, true); ok {
+			selected = selectedPolicyRule{
+				actionType: classification.CompositionActionType,
+				rule:       rule,
+				overlayID:  overlay.overlay.ID,
+				source:     overlay.overlay.Source,
+			}
+			return guardianDecisionFromSelectedRule(req, profileName, selected, classification)
+		}
+	}
+	for _, actionType := range actionTypes {
+		candidate := selectPolicyRuleForActionType(req, overlays, profileName, profile, actionType, g.cfg.AskFallback)
+		if shouldUseDecision(candidate.actionType, candidate.rule, selected.actionType, selected.rule) {
+			selected = candidate
+		}
 	}
 
+	return guardianDecisionFromSelectedRule(req, profileName, selected, classification)
+}
+
+func guardianDecisionFromSelectedRule(
+	req sdk.GuardianRequest,
+	profileName string,
+	selected selectedPolicyRule,
+	classification execClassification,
+) sdk.GuardianDecision {
 	metadata := map[string]any{
 		actionTypeMetadataKey: selected.actionType,
 	}
@@ -497,24 +516,43 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 }
 
-func selectPolicyOverlayRule(req sdk.GuardianRequest, overlays []policyOverlay, actionTypes []string, overrideHardBlocks bool) (selectedPolicyRule, bool) {
-	var selected selectedPolicyRule
-	for _, candidateType := range actionTypes {
-		rule, overlay, ok := policyOverlayRule(req, overlays, candidateType, overrideHardBlocks)
-		if !ok {
-			continue
-		}
-		candidate := selectedPolicyRule{
-			actionType: candidateType,
+func selectPolicyRuleForActionType(
+	req sdk.GuardianRequest,
+	overlays []policyOverlay,
+	profileName string,
+	profile policyProfile,
+	actionType string,
+	askFallback bool,
+) selectedPolicyRule {
+	if rule, overlay, ok := policyOverlayRule(req, overlays, actionType, true); ok {
+		return selectedPolicyRule{
+			actionType: actionType,
 			rule:       rule,
 			overlayID:  overlay.overlay.ID,
 			source:     overlay.overlay.Source,
 		}
-		if shouldUseDecision(candidate.actionType, candidate.rule, selected.actionType, selected.rule) {
-			selected = candidate
+	}
+	if rule, ok := profileHardBlockRule(profileName, actionType); ok {
+		if rule.decision == sdk.GuardianDecisionAsk {
+			profileCandidate := profilePolicyRule(req, profile, actionType, askFallback)
+			if profileCandidate.rule.decision == sdk.GuardianDecisionBlock {
+				return profileCandidate
+			}
+		}
+		return selectedPolicyRule{
+			actionType: actionType,
+			rule:       rule,
 		}
 	}
-	return selected, selected.actionType != ""
+	if rule, overlay, ok := policyOverlayRule(req, overlays, actionType, false); ok {
+		return selectedPolicyRule{
+			actionType: actionType,
+			rule:       rule,
+			overlayID:  overlay.overlay.ID,
+			source:     overlay.overlay.Source,
+		}
+	}
+	return profilePolicyRule(req, profile, actionType, askFallback)
 }
 
 func policyOverlayRule(req sdk.GuardianRequest, overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
@@ -527,45 +565,6 @@ func policyOverlayRule(req sdk.GuardianRequest, overlays []policyOverlay, action
 		}
 	}
 	return policyRule{}, policyOverlay{}, false
-}
-
-func selectOverrideOrHardBlockRule(req sdk.GuardianRequest, overlays []policyOverlay, profileName string, actionTypes []string) (selectedPolicyRule, bool) {
-	var selected selectedPolicyRule
-	for _, candidateType := range actionTypes {
-		rule, overlay, ok := policyOverlayRule(req, overlays, candidateType, true)
-		candidate := selectedPolicyRule{
-			actionType: candidateType,
-			rule:       rule,
-			overlayID:  overlay.overlay.ID,
-			source:     overlay.overlay.Source,
-		}
-		if !ok {
-			rule, ok = profileHardBlockRule(profileName, candidateType)
-			if !ok {
-				continue
-			}
-			candidate = selectedPolicyRule{
-				actionType: candidateType,
-				rule:       rule,
-			}
-		}
-		if shouldUseDecision(candidate.actionType, candidate.rule, selected.actionType, selected.rule) {
-			selected = candidate
-		}
-	}
-	return selected, selected.actionType != ""
-}
-
-func selectProfilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionTypes []string, askFallback bool) selectedPolicyRule {
-	var selected selectedPolicyRule
-	for _, candidateType := range actionTypes {
-		candidate := profilePolicyRule(req, profile, candidateType, askFallback)
-		rule := candidate.rule
-		if shouldUseDecision(candidateType, rule, selected.actionType, selected.rule) {
-			selected = candidate
-		}
-	}
-	return selected
 }
 
 func profilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionType string, askFallback bool) selectedPolicyRule {
@@ -659,12 +658,13 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 		if reason == "" {
 			reason = fmt.Sprintf("custom profile %s overrides action", name)
 		}
+		normalizedDecision := normalizeDecision(decision)
 		for _, actionType := range actionTypes {
-			if _, hard := hardBlockRule(actionType); hard {
+			if _, hard := hardBlockRule(actionType); hard && normalizedDecision == sdk.GuardianDecisionAllow {
 				continue
 			}
 			rules[actionType] = append(rules[actionType], policyRule{
-				decision: normalizeDecision(decision),
+				decision: normalizedDecision,
 				reason:   reason,
 				metadata: maps.Clone(override.Metadata),
 			})
@@ -672,11 +672,12 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 	}
 
 	for actionType, decision := range legacyProfileActions(cfg) {
-		if _, hard := hardBlockRule(actionType); hard {
+		normalizedDecision := normalizeDecision(sdk.GuardianDecisionAction(decision))
+		if _, hard := hardBlockRule(actionType); hard && normalizedDecision == sdk.GuardianDecisionAllow {
 			continue
 		}
 		rules[actionType] = append(rules[actionType], policyRule{
-			decision: normalizeDecision(sdk.GuardianDecisionAction(decision)),
+			decision: normalizedDecision,
 			reason:   fmt.Sprintf("custom profile %s overrides %s", name, actionType),
 		})
 	}
@@ -725,7 +726,10 @@ func profileRuleActionTypes(rule sdk.GuardianProfileRule) []string {
 	types := make([]string, 0, len(rule.Actions)+1)
 	if rule.Metadata != nil {
 		if actionType, ok := metadataActionType(rule.Metadata); ok {
-			types = append(types, actionType)
+			types = appendUniqueString(types, actionType)
+		}
+		if actionType := metadataString(rule.Metadata, grantActionTypeKey); actionType != "" {
+			types = appendUniqueString(types, actionType)
 		}
 	}
 	for _, action := range rule.Actions {
@@ -751,6 +755,13 @@ func profileRuleActionTypes(rule sdk.GuardianProfileRule) []string {
 		}
 	}
 	return types
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if slices.Contains(values, value) {
+		return values
+	}
+	return append(values, value)
 }
 
 func legacyProfileActions(profile sdk.GuardianProfile) map[string]string {
@@ -1032,7 +1043,10 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 
 func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sdk.GuardianDecision, resolution sdk.GuardianResolution) {
 	g.mu.Lock()
-	activeProfile := g.cfg.Profile
+	targetProfile := decision.Profile
+	if targetProfile == "" {
+		targetProfile = g.cfg.Profile
+	}
 	updated := cloneGuardianConfig(g.cfg)
 	g.mu.Unlock()
 
@@ -1040,7 +1054,7 @@ func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sd
 	if !ok {
 		return
 	}
-	appendProfileRule(&updated, activeProfile, rule)
+	appendProfileRule(&updated, targetProfile, rule)
 
 	if err := g.configWriter.SaveExtensionConfig(extensionName, extensionName, updated); err != nil {
 		return
@@ -1443,6 +1457,7 @@ func shellStageNetworkHost(stage shellStage) string {
 }
 
 func requestNetworkHost(req sdk.GuardianRequest) string {
+	//nolint:goconst // These are distinct request metadata keys that may carry network hosts.
 	for _, key := range []string{"host", "url", "uri", "endpoint", "target", "http.host"} {
 		if host := urlHost(metadataString(req.Metadata, key)); host != "" {
 			return host
