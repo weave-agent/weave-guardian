@@ -77,6 +77,7 @@ type policyOverlay struct {
 type Guardian struct {
 	cfg             Config
 	bus             sdk.Bus
+	configWriter    sdk.ExtensionConfigWriter
 	profiles        map[string]policyProfile
 	headless        bool
 	approvalTimeout time.Duration
@@ -103,19 +104,31 @@ type DecisionRecord struct {
 }
 
 func init() { //nolint:gochecknoinits // SDK extensions register themselves during package initialization.
-	sdk.RegisterExtensionWithScope[Config](extensionName, extensionName, func(sdkCfg sdk.Config, _ sdk.PreferenceReader, cfg Config) (sdk.Extension, error) {
-		return newGuardian(cfg, sdkCfg.IsHeadless()), nil
+	sdk.RegisterExtensionWithScopeAndWriter[Config](extensionName, extensionName, func(sdkCfg sdk.Config, writer sdk.PreferenceWriter, cfg Config) (sdk.Extension, error) {
+		configWriter, ok := writer.(sdk.ExtensionConfigWriter)
+		if !ok {
+			configWriter = noopConfigWriter{}
+		}
+
+		return newGuardianWithWriter(cfg, sdkCfg.IsHeadless(), configWriter), nil
 	})
 }
 
 // New creates a Guardian extension with normalized config defaults.
 func New(cfg Config) *Guardian {
-	return newGuardian(cfg, false)
+	return newGuardianWithWriter(cfg, false, noopConfigWriter{})
 }
 
 func newGuardian(cfg Config, headless bool) *Guardian {
+	return newGuardianWithWriter(cfg, headless, noopConfigWriter{})
+}
+
+func newGuardianWithWriter(cfg Config, headless bool, writer sdk.ExtensionConfigWriter) *Guardian {
 	if cfg.Profile == "" {
 		cfg.Profile = defaultProfile
+	}
+	if writer == nil {
+		writer = noopConfigWriter{}
 	}
 
 	profiles := resolveProfiles(cfg.Profiles)
@@ -125,11 +138,18 @@ func newGuardian(cfg Config, headless bool) *Guardian {
 
 	return &Guardian{
 		cfg:             cfg,
+		configWriter:    writer,
 		profiles:        profiles,
 		headless:        headless,
 		approvalTimeout: approvalTimeout(cfg.ApprovalTimeout),
 		pending:         make(map[string]*pendingApproval),
 	}
+}
+
+type noopConfigWriter struct{}
+
+func (noopConfigWriter) SaveExtensionConfig(_, _ string, _ any) error {
+	return sdk.ErrExtensionConfigWriterUnavailable
 }
 
 func (g *Guardian) Name() string { return extensionName }

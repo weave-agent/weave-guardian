@@ -48,9 +48,12 @@ func (b *stubBus) events() []sdk.Event {
 }
 
 type configStub struct {
-	scope string
-	name  string
-	cfg   Config
+	scope                string
+	name                 string
+	cfg                  Config
+	savedExtensionScope  string
+	savedExtensionName   string
+	savedExtensionTarget any
 }
 
 func (c *configStub) FilePath() string   { return "" }
@@ -73,6 +76,35 @@ func (c *configStub) SavePreferences(any) error { return nil }
 func (c *configStub) SaveProviderKey(string, string) error {
 	return nil
 }
+func (c *configStub) SaveExtensionConfig(scope, name string, target any) error {
+	c.savedExtensionScope = scope
+	c.savedExtensionName = name
+	c.savedExtensionTarget = target
+
+	return nil
+}
+
+type writerlessConfigStub struct {
+	scope string
+	name  string
+	cfg   Config
+}
+
+func (c *writerlessConfigStub) FilePath() string   { return "" }
+func (c *writerlessConfigStub) ProjectDir() string { return "" }
+func (c *writerlessConfigStub) ExtensionConfig(scope, name string, target any) error {
+	c.scope = scope
+	c.name = name
+
+	cfg, ok := target.(*Config)
+	if ok {
+		*cfg = c.cfg
+	}
+
+	return nil
+}
+func (c *writerlessConfigStub) IsHeadless() bool       { return true }
+func (c *writerlessConfigStub) RespectGitignore() bool { return true }
 
 func TestGuardianRegisteredWithSDK(t *testing.T) {
 	assert.True(t, sdk.ExtensionRegistered(extensionName))
@@ -95,11 +127,42 @@ func TestGetExtensionLoadsGuardianScopedConfig(t *testing.T) {
 	assert.Equal(t, "auto", snapshot.CurrentProfile)
 }
 
+func TestGetExtensionStoresWriterCapableConfig(t *testing.T) {
+	cfg := &configStub{cfg: Config{Profile: "auto"}}
+
+	ext, err := sdk.GetExtension(extensionName, cfg)
+	require.NoError(t, err)
+
+	g, ok := ext.(*Guardian)
+	require.True(t, ok)
+	assert.Same(t, cfg, g.configWriter)
+
+	target := Config{Profile: "ask"}
+	require.NoError(t, g.configWriter.SaveExtensionConfig(extensionName, extensionName, target))
+	assert.Equal(t, extensionName, cfg.savedExtensionScope)
+	assert.Equal(t, extensionName, cfg.savedExtensionName)
+	assert.Equal(t, target, cfg.savedExtensionTarget)
+}
+
+func TestGetExtensionStoresNoopWriterForWriterlessConfig(t *testing.T) {
+	cfg := &writerlessConfigStub{cfg: Config{Profile: "auto"}}
+
+	ext, err := sdk.GetExtension(extensionName, cfg)
+	require.NoError(t, err)
+
+	g, ok := ext.(*Guardian)
+	require.True(t, ok)
+	assert.Equal(t, extensionName, cfg.scope)
+	assert.Equal(t, extensionName, cfg.name)
+	require.ErrorIs(t, g.configWriter.SaveExtensionConfig(extensionName, extensionName, Config{}), sdk.ErrExtensionConfigWriterUnavailable)
+}
+
 func TestNewDefaultsToAskProfile(t *testing.T) {
 	g := New(Config{})
 
 	assert.Equal(t, extensionName, g.Name())
 	assert.Equal(t, defaultProfile, g.cfg.Profile)
+	require.ErrorIs(t, g.configWriter.SaveExtensionConfig(extensionName, extensionName, Config{}), sdk.ErrExtensionConfigWriterUnavailable)
 }
 
 func TestSubscribePublishesGuardianRegistered(t *testing.T) {
