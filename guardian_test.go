@@ -73,6 +73,7 @@ func (c *configStub) ExtensionConfig(scope, name string, target any) error {
 
 	return nil
 }
+
 func (c *configStub) IsHeadless() bool          { return true }
 func (c *configStub) RespectGitignore() bool    { return true }
 func (c *configStub) Preferences(any) error     { return nil }
@@ -80,6 +81,7 @@ func (c *configStub) SavePreferences(any) error { return nil }
 func (c *configStub) SaveProviderKey(string, string) error {
 	return nil
 }
+
 func (c *configStub) SaveExtensionConfig(scope, name string, target any) error {
 	c.savedExtensionScope = scope
 	c.savedExtensionName = name
@@ -2692,6 +2694,140 @@ func TestProfileApprovalPersistsRuleToConfigWriter(t *testing.T) {
 	assertPublishedSnapshot(t, bus)
 }
 
+func TestSessionApprovalRemainsRuntimeOnly(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action: sdk.GuardianResolutionAllow,
+			Scope:  sdk.GuardianGrantScopeSession,
+			Reason: "allow similar for session",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	workingDir := t.TempDir()
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-session-runtime-only",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	assert.Equal(t, 0, writer.saveCount)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Grants, 1)
+	assert.Equal(t, sdk.GuardianGrantScopeSession, snapshot.Grants[0].Scope)
+	assert.Empty(t, g.cfg.Profiles)
+
+	reinitialized := New(Config{Profile: "ask"})
+	reinitializedDecision := reinitialized.policyDecision(sdk.GuardianRequest{
+		ID:         "req-session-runtime-only-reinit",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, reinitializedDecision.Action)
+}
+
+func TestProfileApprovalPersistsConstrainedRuleAcrossReinitialization(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{
+		Profile:         "team",
+		ApprovalTimeout: "1s",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Name: "team",
+				Metadata: map[string]any{
+					"extends": "ask",
+				},
+			},
+		},
+	}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action:    sdk.GuardianResolutionAllow,
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+			Reason:    "add exact file rule to profile",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	workingDir := t.TempDir()
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-profile-reinit-save",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	saved, ok := writer.savedExtensionTarget.(Config)
+	require.True(t, ok)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
+	require.Contains(t, snapshot.Profiles, "team")
+	requireProfileRuleWithMetadata(t, snapshot.Profiles["team"], actionFileWrite, grantPathExactKey, normalizeRequestPath("out.txt", workingDir).resolved)
+
+	reinitialized := New(saved)
+	allowed := reinitialized.policyDecision(sdk.GuardianRequest{
+		ID:         "req-profile-reinit-allowed",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+
+	unrelated := reinitialized.policyDecision(sdk.GuardianRequest{
+		ID:         "req-profile-reinit-unrelated",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "other.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
+}
+
+func TestProfileApprovalDoesNotPersistUnsafeHardBlockAllow(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
+	decision := sdk.GuardianDecision{
+		Action:  sdk.GuardianDecisionAsk,
+		Profile: "ask",
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionPolicyWrite,
+		},
+	}
+
+	g.applyGrant(sdk.GuardianApproval{
+		Request: sdk.GuardianRequest{
+			ID:     "req-unsafe-profile-allow",
+			Action: sdk.GuardianActionWrite,
+			Path:   "settings.json",
+		},
+	}, decision, sdk.GuardianResolution{
+		Action:    sdk.GuardianResolutionAllow,
+		Scope:     sdk.GuardianGrantScopeProfile,
+		RuleScope: sdk.GuardianProfileRuleScopeActionType,
+		Reason:    "unsafe profile allow",
+	})
+
+	assert.Equal(t, 0, writer.saveCount)
+	assert.Empty(t, g.cfg.Profiles)
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
+}
+
 func TestProfileApprovalCreatesBuiltInProfileConfigWithDefaultExtends(t *testing.T) {
 	writer := &configStub{}
 	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
@@ -3726,14 +3862,12 @@ func TestLegacyProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
 			profileMetadataKey:    "ask",
 		},
 	}
-	for key, value := range grantConstraintsForRequest(grantReq, sdk.GuardianDecision{
+	maps.Copy(grantReq.Metadata, grantConstraintsForRequest(grantReq, sdk.GuardianDecision{
 		Profile: "ask",
 		Metadata: map[string]any{
 			actionTypeMetadataKey: actionFileWrite,
 		},
-	}, true) {
-		grantReq.Metadata[key] = value
-	}
+	}, true))
 	g.grants = []sdk.GuardianGrant{
 		{
 			ID:         "legacy-profile-grant",
@@ -4167,6 +4301,17 @@ func assertProfileRule(t *testing.T, profile sdk.GuardianProfile, actionType str
 		}
 	}
 	t.Fatalf("profile %s has no rule for action type %s", profile.Name, actionType)
+}
+
+func requireProfileRuleWithMetadata(t *testing.T, profile sdk.GuardianProfile, actionType, key string, value any) {
+	t.Helper()
+
+	for _, rule := range profile.Rules {
+		if rule.Metadata[actionTypeMetadataKey] == actionType && rule.Metadata[key] == value {
+			return
+		}
+	}
+	t.Fatalf("profile %s has no rule for action type %s with %s=%v", profile.Name, actionType, key, value)
 }
 
 func profileRule(actionType string, decision sdk.GuardianDecisionAction) sdk.GuardianProfileRule {

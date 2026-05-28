@@ -584,9 +584,9 @@ func profilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionTyp
 }
 
 func lastMatchingPolicyRule(rules []policyRule, req sdk.GuardianRequest, profileName, actionType string) (policyRule, bool) {
-	for i := len(rules) - 1; i >= 0; i-- {
-		if policyRuleMatchesRequest(rules[i], req, profileName, actionType) {
-			return rules[i], true
+	for _, rule := range slices.Backward(rules) {
+		if policyRuleMatchesRequest(rule, req, profileName, actionType) {
+			return rule, true
 		}
 	}
 	return policyRule{}, false
@@ -646,21 +646,9 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 	resolving[name] = true
 	baseName := profileExtends(cfg)
 	if baseName == "" {
-		if isBuiltInProfileName(name) {
-			baseName = name
-		} else {
-			baseName = defaultProfile
-		}
+		baseName = defaultBaseProfileName(name)
 	}
-
-	base, ok := profiles[baseName]
-	if isBuiltInProfileName(name) && baseName == name {
-		base = profiles[name]
-	} else if _, customBase := custom[baseName]; customBase {
-		base = resolveCustomProfile(baseName, custom, profiles, applied, resolving)
-	} else if !ok {
-		base = profiles[defaultProfile]
-	}
+	base := resolveBaseProfile(name, baseName, custom, profiles, applied, resolving)
 
 	rules := copyRules(base.rules)
 	for _, override := range cfg.Rules {
@@ -705,6 +693,26 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 	resolving[name] = false
 
 	return profile
+}
+
+func defaultBaseProfileName(name string) string {
+	if isBuiltInProfileName(name) {
+		return name
+	}
+	return defaultProfile
+}
+
+func resolveBaseProfile(name, baseName string, custom map[string]sdk.GuardianProfile, profiles map[string]policyProfile, applied, resolving map[string]bool) policyProfile {
+	if isBuiltInProfileName(name) && baseName == name {
+		return profiles[name]
+	}
+	if _, customBase := custom[baseName]; customBase {
+		return resolveCustomProfile(baseName, custom, profiles, applied, resolving)
+	}
+	if profile, ok := profiles[baseName]; ok {
+		return profile
+	}
+	return profiles[defaultProfile]
 }
 
 func profileExtends(profile sdk.GuardianProfile) string {
@@ -1769,8 +1777,7 @@ func sdkProfiles(profiles map[string]policyProfile) map[string]sdk.GuardianProfi
 	for name, profile := range profiles {
 		rules := make([]sdk.GuardianProfileRule, 0, len(profile.rules))
 		for actionType, compiledRules := range profile.rules {
-			for i := len(compiledRules) - 1; i >= 0; i-- {
-				rule := compiledRules[i]
+			for _, rule := range slices.Backward(compiledRules) {
 				metadata := maps.Clone(rule.metadata)
 				if metadata == nil {
 					metadata = make(map[string]any)

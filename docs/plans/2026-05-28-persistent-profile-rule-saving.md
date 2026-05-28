@@ -102,12 +102,12 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify `Allow similar for session` remains runtime-only
-- [ ] verify `Add rule to profile` persists to config only when a safe constrained rule can be built
-- [ ] verify persisted rules survive Guardian reinitialization
-- [ ] verify snapshots include saved profile rules but runtime profile grants are no longer required for persistence
-- [ ] run full test suite with `go test ./...`
-- [ ] run linter with `golangci-lint run` or the repo Makefile if present
+- [x] verify `Allow similar for session` remains runtime-only
+- [x] verify `Add rule to profile` persists to config only when a safe constrained rule can be built
+- [x] verify persisted rules survive Guardian reinitialization
+- [x] verify snapshots include saved profile rules but runtime profile grants are no longer required for persistence
+- [x] run full test suite with `go test ./...`
+- [x] run linter with `golangci-lint run` or the repo Makefile if present
 
 ### Task 7: Update documentation
 - [ ] update `README.md` Guardian profile examples if they document profile rules
