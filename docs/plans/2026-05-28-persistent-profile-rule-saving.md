@@ -94,12 +94,12 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 5: Allow saved additions to built-in profiles
-- [ ] update `resolveCustomProfile` so custom config entries named `ask`, `auto`, or `yolo` can extend/override their built-in base instead of being ignored
-- [ ] avoid inheritance cycles when a built-in-name profile has missing or self-referential `extends` metadata
-- [ ] preserve existing custom profile inheritance semantics
-- [ ] write tests that `guardian.profiles.ask.rules` adds constrained rules to the ask profile
-- [ ] write tests that built-in hard-block protections still apply after built-in profile extension
-- [ ] run `go test ./...` - must pass before next task
+- [x] update `resolveCustomProfile` so custom config entries named `ask`, `auto`, or `yolo` can extend/override their built-in base instead of being ignored
+- [x] avoid inheritance cycles when a built-in-name profile has missing or self-referential `extends` metadata
+- [x] preserve existing custom profile inheritance semantics
+- [x] write tests that `guardian.profiles.ask.rules` adds constrained rules to the ask profile
+- [x] write tests that built-in hard-block protections still apply after built-in profile extension
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 - [ ] verify `Allow similar for session` remains runtime-only

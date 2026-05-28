@@ -614,36 +614,52 @@ func policyRuleMatchesRequest(rule policyRule, req sdk.GuardianRequest, profileN
 
 func resolveProfiles(custom map[string]sdk.GuardianProfile) map[string]policyProfile {
 	profiles := builtInProfiles()
+	applied := make(map[string]bool, len(custom))
 
 	for name := range custom {
-		resolveCustomProfile(name, custom, profiles, make(map[string]bool))
+		resolveCustomProfile(name, custom, profiles, applied, make(map[string]bool))
 	}
 
 	return profiles
 }
 
-func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, profiles map[string]policyProfile, resolving map[string]bool) policyProfile {
-	if profile, ok := profiles[name]; ok {
-		return profile
+func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, profiles map[string]policyProfile, applied, resolving map[string]bool) policyProfile {
+	if applied[name] {
+		if profile, ok := profiles[name]; ok {
+			return profile
+		}
+	}
+	cfg, hasCustom := custom[name]
+	if !hasCustom {
+		if profile, ok := profiles[name]; ok {
+			return profile
+		}
+		return profiles[defaultProfile]
 	}
 	if resolving[name] {
+		if profile, ok := profiles[name]; ok && isBuiltInProfileName(name) {
+			return profile
+		}
 		return profiles[defaultProfile]
 	}
 
 	resolving[name] = true
-	cfg := custom[name]
 	baseName := profileExtends(cfg)
 	if baseName == "" {
-		baseName = defaultProfile
+		if isBuiltInProfileName(name) {
+			baseName = name
+		} else {
+			baseName = defaultProfile
+		}
 	}
 
 	base, ok := profiles[baseName]
-	if !ok {
-		if _, customBase := custom[baseName]; customBase {
-			base = resolveCustomProfile(baseName, custom, profiles, resolving)
-		} else {
-			base = profiles[defaultProfile]
-		}
+	if isBuiltInProfileName(name) && baseName == name {
+		base = profiles[name]
+	} else if _, customBase := custom[baseName]; customBase {
+		base = resolveCustomProfile(baseName, custom, profiles, applied, resolving)
+	} else if !ok {
+		base = profiles[defaultProfile]
 	}
 
 	rules := copyRules(base.rules)
@@ -685,6 +701,7 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 		rules:       rules,
 	}
 	profiles[name] = profile
+	applied[name] = true
 	resolving[name] = false
 
 	return profile

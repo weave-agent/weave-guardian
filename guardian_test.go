@@ -1240,6 +1240,92 @@ func TestCustomProfileCannotOverrideHardBlocks(t *testing.T) {
 	assert.Equal(t, actionPolicyWrite, decision.Metadata[actionTypeMetadataKey])
 }
 
+func TestBuiltInAskProfileConfigAddsConstrainedRules(t *testing.T) {
+	workingDir := t.TempDir()
+	allowedPath := normalizeRequestPath("allowed.txt", workingDir).resolved
+	g := New(Config{
+		Profile: "ask",
+		Profiles: map[string]sdk.GuardianProfile{
+			"ask": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved ask exact file",
+					Metadata: constrainedRuleMetadata(actionFileWrite, map[string]any{
+						grantPathExactKey: allowedPath,
+					}),
+				}},
+			},
+		},
+	})
+
+	allowed := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-built-in-ask-saved-file",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "allowed.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+	assert.Equal(t, "saved ask exact file", allowed.Reason)
+
+	unrelated := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-built-in-ask-unrelated-file",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "other.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
+	assert.Equal(t, "file writes require approval", unrelated.Reason)
+}
+
+func TestBuiltInProfileConfigWithMissingExtendsUsesBuiltInBase(t *testing.T) {
+	g := New(Config{
+		Profile: "auto",
+		Profiles: map[string]sdk.GuardianProfile{
+			"auto": {
+				Rules: []sdk.GuardianProfileRule{
+					profileRule(actionNetworkWrite, sdk.GuardianDecisionBlock),
+				},
+			},
+		},
+	})
+
+	writeDecision := policyDecisionForActionType(g, actionFileWrite)
+	assert.Equal(t, sdk.GuardianDecisionAllow, writeDecision.Action)
+
+	networkDecision := policyDecisionForActionType(g, actionNetworkWrite)
+	assert.Equal(t, sdk.GuardianDecisionBlock, networkDecision.Action)
+}
+
+func TestBuiltInProfileExtensionKeepsHardBlockProtections(t *testing.T) {
+	g := New(Config{
+		Profile: "ask",
+		Profiles: map[string]sdk.GuardianProfile{
+			"ask": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{
+					profileRule(actionPolicyWrite, sdk.GuardianDecisionAllow),
+					profileRule(actionFileWrite, sdk.GuardianDecisionAllow),
+				},
+			},
+		},
+	})
+
+	allowedWrite := policyDecisionForActionType(g, actionFileWrite)
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowedWrite.Action)
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-built-in-ask-policy-write",
+		Action:     sdk.GuardianActionWrite,
+		Path:       filepath.Join(t.TempDir(), ".weave", "guardian", "settings.json"),
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, actionPolicyWrite, decision.Metadata[actionTypeMetadataKey])
+}
+
 func TestMissingCustomProfileBaseFallsBackToAskProfile(t *testing.T) {
 	g := New(Config{
 		Profile: "team",
