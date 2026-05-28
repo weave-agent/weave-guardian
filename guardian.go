@@ -1092,11 +1092,9 @@ func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sd
 func profileRulePatch(profileName string, profile sdk.GuardianProfile) map[string]any {
 	profile = cloneGuardianProfile(profile)
 	profilePatch := map[string]any{
-		"rules": profile.Rules,
-	}
-	if isBuiltInProfileName(profileName) {
-		profilePatch["name"] = profile.Name
-		profilePatch["metadata"] = maps.Clone(profile.Metadata)
+		"name":     profile.Name,
+		"metadata": maps.Clone(profile.Metadata),
+		"rules":    profile.Rules,
 	}
 	return map[string]any{
 		"profiles": map[string]any{
@@ -1135,7 +1133,10 @@ func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.Gu
 	if actionType == "" {
 		actionType = requestActionType(approval.Request)
 	}
-	ruleDecision := profileRuleDecisionFromResolution(resolution)
+	ruleDecision, ok := profileRuleDecisionFromResolution(resolution)
+	if !ok {
+		return sdk.GuardianProfileRule{}, false
+	}
 	if ruleDecision == sdk.GuardianDecisionAllow {
 		if _, hard := hardBlockRule(actionType); hard {
 			return sdk.GuardianProfileRule{}, false
@@ -1164,11 +1165,15 @@ func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.Gu
 	}, true
 }
 
-func profileRuleDecisionFromResolution(resolution sdk.GuardianResolution) sdk.GuardianDecisionAction {
-	if resolution.Action == sdk.GuardianResolutionDeny {
-		return sdk.GuardianDecisionBlock
+func profileRuleDecisionFromResolution(resolution sdk.GuardianResolution) (sdk.GuardianDecisionAction, bool) {
+	switch resolution.Action {
+	case sdk.GuardianResolutionAllow:
+		return sdk.GuardianDecisionAllow, true
+	case sdk.GuardianResolutionDeny:
+		return sdk.GuardianDecisionBlock, true
+	default:
+		return "", false
 	}
-	return sdk.GuardianDecisionAllow
 }
 
 func normalizedRuleScope(req sdk.GuardianRequest, requested sdk.GuardianProfileRuleScope) sdk.GuardianProfileRuleScope {

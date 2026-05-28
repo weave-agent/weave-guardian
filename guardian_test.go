@@ -2040,6 +2040,24 @@ func TestCoreCommandClassifiers(t *testing.T) {
 			want:     sdk.GuardianDecisionAsk,
 		},
 		{
+			name:     "aws s3 upload with leading query writes remote",
+			command:  "aws --query Contents s3 cp artifact.txt s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "aws s3 upload with leading cli input writes remote",
+			command:  "aws --cli-input-json file://input.json s3 cp artifact.txt s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "aws s3 upload with leading ca bundle writes remote",
+			command:  "aws --ca-bundle ./ca.pem s3 cp artifact.txt s3://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
 			name:     "aws s3 multi-source upload writes remote",
 			command:  "aws s3 cp artifact-one.txt artifact-two.txt s3://example-bucket/",
 			wantType: actionNetworkWrite,
@@ -2120,6 +2138,12 @@ func TestCoreCommandClassifiers(t *testing.T) {
 		{
 			name:     "gcloud storage upload from stdin writes remote",
 			command:  "gcloud storage cp - gs://example-bucket/artifact.txt",
+			wantType: actionNetworkWrite,
+			want:     sdk.GuardianDecisionAsk,
+		},
+		{
+			name:     "gcloud storage upload with read paths from stdin writes remote",
+			command:  "gcloud storage cp --read-paths-from-stdin gs://example-bucket/artifact.txt",
 			wantType: actionNetworkWrite,
 			want:     sdk.GuardianDecisionAsk,
 		},
@@ -2755,8 +2779,9 @@ func TestProfileApprovalPersistsRuleToConfigWriter(t *testing.T) {
 	assert.Equal(t, extensionName, writer.savedExtensionScope)
 	assert.Equal(t, extensionName, writer.savedExtensionName)
 	savedProfile := requireSavedProfilePatch(t, writer, "team")
-	assert.Empty(t, savedProfile.Name)
-	assert.Empty(t, savedProfile.Metadata)
+	assert.Equal(t, "team", savedProfile.Name)
+	assert.Equal(t, "ask", savedProfile.Metadata["extends"])
+	assert.Equal(t, "engineering", savedProfile.Metadata["owner"])
 	require.Len(t, savedProfile.Rules, 1)
 	assert.Equal(t, sdk.GuardianDecisionAllow, savedProfile.Rules[0].Decision)
 	assert.Equal(t, "persist exact file", savedProfile.Rules[0].Reason)
@@ -2853,6 +2878,44 @@ func TestProfileApprovalPersistsToDecisionProfileAfterProfileChange(t *testing.T
 	assert.Equal(t, "persist to original profile", saved.Profiles["team"].Rules[0].Reason)
 }
 
+func TestProfileApprovalPatchPreservesCustomProfileInheritance(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Name:     "team",
+				Metadata: map[string]any{"extends": "auto"},
+			},
+		},
+	}, false, writer)
+	workingDir := t.TempDir()
+	g.persistProfileRule(sdk.GuardianApproval{
+		Request: sdk.GuardianRequest{
+			ID:         "req-profile-save-preserve-inheritance",
+			Action:     sdk.GuardianActionWrite,
+			Path:       "out.txt",
+			WorkingDir: workingDir,
+		},
+	}, sdk.GuardianDecision{
+		Action:  sdk.GuardianDecisionAsk,
+		Profile: "team",
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionFileWrite,
+		},
+	}, sdk.GuardianResolution{
+		Action:    sdk.GuardianResolutionAllow,
+		Scope:     sdk.GuardianGrantScopeProfile,
+		RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+		Reason:    "persist team exception",
+	})
+
+	savedProfile := requireSavedProfilePatch(t, writer, "team")
+	assert.Equal(t, "team", savedProfile.Name)
+	assert.Equal(t, "auto", savedProfile.Metadata["extends"])
+	require.Len(t, savedProfile.Rules, 1)
+}
+
 func TestProfileDenyPersistsBlockRuleToConfigWriter(t *testing.T) {
 	writer := &configStub{}
 	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
@@ -2902,6 +2965,33 @@ func TestProfileDenyPersistsBlockRuleToConfigWriter(t *testing.T) {
 		WorkingDir: workingDir,
 	})
 	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
+}
+
+func TestProfileApprovalIgnoresMalformedResolutionAction(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+			Reason:    "malformed profile resolution",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-profile-malformed-resolution",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+	assert.Equal(t, "malformed profile resolution", decision.Reason)
+	assert.Equal(t, 0, writer.saveCount)
+	assert.Empty(t, g.cfg.Profiles)
 }
 
 func TestSessionApprovalRemainsRuntimeOnly(t *testing.T) {

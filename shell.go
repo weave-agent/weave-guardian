@@ -767,11 +767,25 @@ func cloudCommandArgsAfterGlobalOptions(args, lowerArgs []string) ([]string, []s
 
 func cloudCopyWritesRemote(args []string) bool {
 	operands := cloudCopyOperands(args)
+	if cloudCopyReadsSourcesFromStdin(args) && len(operands) == 1 {
+		dst := operands[0]
+		return strings.Contains(dst, "://") || strings.HasPrefix(dst, "s3://") || strings.HasPrefix(dst, "gs://")
+	}
 	if len(operands) < 2 {
 		return false
 	}
 	dst := operands[len(operands)-1]
 	return strings.Contains(dst, "://") || strings.HasPrefix(dst, "s3://") || strings.HasPrefix(dst, "gs://")
+}
+
+func cloudCopyReadsSourcesFromStdin(args []string) bool {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(strings.ToLower(arg), "=")
+		if name == "--read-paths-from-stdin" {
+			return true
+		}
+	}
+	return false
 }
 
 func cloudCopyOperands(args []string) []string {
@@ -817,7 +831,6 @@ func cloudCopyOptionTakesValue(arg string) bool {
 		"--metadata",
 		"--profile",
 		"--project",
-		"--read-paths-from-stdin",
 		"--region",
 		"--source-region",
 		"--storage-class",
@@ -838,12 +851,16 @@ func cloudOptionTakesValue(arg string) bool {
 		"--access-token-file",
 		"--account",
 		"--api-endpoint-overrides",
+		"--ca-bundle",
+		"--cli-input-json",
+		"--cli-input-yaml",
 		"--configuration",
 		"--flags-file",
 		"--format",
 		"--impersonate-service-account",
 		"--log-file",
-		"--output":
+		"--output",
+		"--query":
 		return true
 	default:
 		return cloudCopyOptionTakesValue(arg)
