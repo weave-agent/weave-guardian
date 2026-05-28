@@ -5,6 +5,7 @@
 - Registration: package init registers `guardian` with config scope `guardian` through `sdk.RegisterExtensionWithScopeAndWriter[Config]` so profile approvals can persist scoped config changes.
 - Core files: `guardian.go` owns profiles, decisions, approvals, grants, snapshots, and history; `classifier.go` owns path and request classification; `shell.go` owns shell parsing and command taxonomy.
 - Classification convention: requests normalize to action type strings stored in decision metadata under `action_type`; exec requests can produce multiple stage action types and policy selection chooses by decision severity, then action rank.
+- Cloud classifier convention: AWS and GCloud classifiers strip supported global options and option values before identifying subcommands and copy operands; update `cloudOptionTakesValue` or `cloudCopyOptionTakesValue` when adding cloud flag handling.
 - Policy convention: hard blocks apply to `ask`, `auto`, and custom profiles, and must not be bypassed by grants. `yolo` allows all actions.
 - Overlay convention: runtime policy overlays live only in memory, are pushed/popped via SDK bus topics, and are not config profiles. Push requires a non-empty ID; pushing the same ID replaces it and gives it newest precedence.
 - Policy evaluation order: override overlays (`OverrideHardBlocks=true`) run before built-in hard blocks; built-in hard blocks run before normal overlays; normal overlays run before active profile rules.

@@ -2684,7 +2684,7 @@ func TestProfileApprovalPersistsRuleToConfigWriter(t *testing.T) {
 	assert.Equal(t, sdk.GuardianDecisionAllow, savedProfile.Rules[0].Decision)
 	assert.Equal(t, "persist exact file", savedProfile.Rules[0].Reason)
 	assert.Equal(t, actionFileWrite, savedProfile.Rules[0].Metadata[grantActionTypeKey])
-	assert.Equal(t, "team", savedProfile.Rules[0].Metadata[grantProfileKey])
+	assert.NotContains(t, savedProfile.Rules[0].Metadata, grantProfileKey)
 	assert.Equal(t, normalizeRequestPath("out.txt", workingDir).resolved, savedProfile.Rules[0].Metadata[grantPathExactKey])
 
 	snapshot, err := g.Snapshot(context.Background())
@@ -2692,6 +2692,59 @@ func TestProfileApprovalPersistsRuleToConfigWriter(t *testing.T) {
 	assert.Empty(t, snapshot.Grants)
 	require.Contains(t, snapshot.Profiles, "team")
 	assertPublishedSnapshot(t, bus)
+}
+
+func TestProfileDenyPersistsBlockRuleToConfigWriter(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action:    sdk.GuardianResolutionDeny,
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+			Reason:    "block exact file",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	workingDir := t.TempDir()
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-profile-deny-save",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "blocked.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionBlock, decision.Action)
+
+	assert.Equal(t, 1, writer.saveCount)
+	saved, ok := writer.savedExtensionTarget.(Config)
+	require.True(t, ok)
+	savedProfile := saved.Profiles["ask"]
+	require.Len(t, savedProfile.Rules, 1)
+	assert.Equal(t, sdk.GuardianDecisionBlock, savedProfile.Rules[0].Decision)
+	assert.Equal(t, "block exact file", savedProfile.Rules[0].Reason)
+	assert.Equal(t, normalizeRequestPath("blocked.txt", workingDir).resolved, savedProfile.Rules[0].Metadata[grantPathExactKey])
+
+	reinitialized := New(saved)
+	blocked := reinitialized.policyDecision(sdk.GuardianRequest{
+		ID:         "req-profile-deny-saved-blocked",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "blocked.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionBlock, blocked.Action)
+	assert.Equal(t, "block exact file", blocked.Reason)
+
+	unrelated := reinitialized.policyDecision(sdk.GuardianRequest{
+		ID:         "req-profile-deny-saved-unrelated",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "other.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
 }
 
 func TestSessionApprovalRemainsRuntimeOnly(t *testing.T) {
@@ -3029,7 +3082,6 @@ func TestBuildProfileRuleFromApprovalMapsRuleScopes(t *testing.T) {
 			rule, ok := buildProfileRuleFromApproval(
 				sdk.GuardianApproval{Request: tt.request},
 				decision,
-				defaultProfile,
 				sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow, RuleScope: tt.ruleScope, Reason: "approved for profile"},
 			)
 
@@ -3038,7 +3090,7 @@ func TestBuildProfileRuleFromApprovalMapsRuleScopes(t *testing.T) {
 			assert.Equal(t, "approved for profile", rule.Reason)
 			assert.Equal(t, tt.actionType, rule.Metadata[actionTypeMetadataKey])
 			assert.Equal(t, tt.actionType, rule.Metadata[grantActionTypeKey])
-			assert.Equal(t, defaultProfile, rule.Metadata[grantProfileKey])
+			assert.NotContains(t, rule.Metadata, grantProfileKey)
 			assert.Equal(t, grantConstraintsVersion, rule.Metadata[grantConstraintsVersionKey])
 			for key, want := range tt.wantMetadata {
 				assert.Equal(t, want, rule.Metadata[key])
@@ -3065,7 +3117,6 @@ func TestBuildProfileRuleFromApprovalDefaultsMissingRuleScopeConservatively(t *t
 			WorkingDir: workingDir,
 		}},
 		sdk.GuardianDecision{Reason: "ask", Metadata: map[string]any{actionTypeMetadataKey: actionFileWrite}},
-		defaultProfile,
 		sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow},
 	)
 	require.True(t, ok)
@@ -3078,7 +3129,6 @@ func TestBuildProfileRuleFromApprovalDefaultsMissingRuleScopeConservatively(t *t
 			WorkingDir: workingDir,
 		}},
 		sdk.GuardianDecision{Reason: "ask", Metadata: map[string]any{actionTypeMetadataKey: actionPackageTest}},
-		defaultProfile,
 		sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow},
 	)
 	require.True(t, ok)
@@ -3090,11 +3140,75 @@ func TestBuildProfileRuleFromApprovalDefaultsMissingRuleScopeConservatively(t *t
 			Metadata: map[string]any{"host": "api.example.com"},
 		}},
 		sdk.GuardianDecision{Reason: "ask", Metadata: map[string]any{actionTypeMetadataKey: actionNetworkRead}},
-		defaultProfile,
 		sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow},
 	)
 	require.True(t, ok)
 	assert.Equal(t, "api.example.com", networkRule.Metadata[grantNetworkHostKey])
+}
+
+func TestBuildProfileRuleFromApprovalRejectsMissingScopeConstraints(t *testing.T) {
+	tests := []struct {
+		name       string
+		request    sdk.GuardianRequest
+		actionType string
+		ruleScope  sdk.GuardianProfileRuleScope
+	}{
+		{
+			name:       "exact file without path",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionWrite},
+			actionType: actionFileWrite,
+			ruleScope:  sdk.GuardianProfileRuleScopeExactFile,
+		},
+		{
+			name:       "directory without path",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionWrite},
+			actionType: actionFileWrite,
+			ruleScope:  sdk.GuardianProfileRuleScopeDirectory,
+		},
+		{
+			name:       "project without working dir",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionWrite, Path: "out.txt"},
+			actionType: actionFileWrite,
+			ruleScope:  sdk.GuardianProfileRuleScopeProject,
+		},
+		{
+			name:       "exact command without command",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionExec},
+			actionType: actionPackageTest,
+			ruleScope:  sdk.GuardianProfileRuleScopeExactCommand,
+		},
+		{
+			name:       "command prefix without command",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionExec},
+			actionType: actionPackageInstall,
+			ruleScope:  sdk.GuardianProfileRuleScopeCommandPrefix,
+		},
+		{
+			name:       "command family without command",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionExec, WorkingDir: t.TempDir()},
+			actionType: actionPackageInstall,
+			ruleScope:  sdk.GuardianProfileRuleScopeCommandFamily,
+		},
+		{
+			name:       "network host without host",
+			request:    sdk.GuardianRequest{Action: sdk.GuardianActionNetwork},
+			actionType: actionNetworkRead,
+			ruleScope:  sdk.GuardianProfileRuleScopeNetworkHost,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule, ok := buildProfileRuleFromApproval(
+				sdk.GuardianApproval{Request: tt.request},
+				sdk.GuardianDecision{Reason: "ask", Metadata: map[string]any{actionTypeMetadataKey: tt.actionType}},
+				sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow, RuleScope: tt.ruleScope},
+			)
+
+			assert.False(t, ok)
+			assert.Empty(t, rule)
+		})
+	}
 }
 
 func TestBuildProfileRuleFromApprovalFallsBackForUnsupportedRuleScope(t *testing.T) {
@@ -3107,7 +3221,6 @@ func TestBuildProfileRuleFromApprovalFallsBackForUnsupportedRuleScope(t *testing
 			WorkingDir: workingDir,
 		}},
 		sdk.GuardianDecision{Reason: "ask", Metadata: map[string]any{actionTypeMetadataKey: actionPackageTest}},
-		defaultProfile,
 		sdk.GuardianResolution{
 			Action:    sdk.GuardianResolutionAllow,
 			RuleScope: sdk.GuardianProfileRuleScope("unknown_scope"),
@@ -3129,7 +3242,6 @@ func TestBuildProfileRuleFromApprovalRejectsAllowForHardBlockedActionType(t *tes
 			Reason:   "remote code execution is blocked",
 			Metadata: map[string]any{actionTypeMetadataKey: actionCommandExecRemote},
 		},
-		defaultProfile,
 		sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow, RuleScope: sdk.GuardianProfileRuleScopeActionType},
 	)
 
@@ -3147,7 +3259,6 @@ func TestBuildProfileRuleFromApprovalAllowsBlockForHardBlockedActionType(t *test
 			Reason:   "remote code execution is blocked",
 			Metadata: map[string]any{actionTypeMetadataKey: actionCommandExecRemote},
 		},
-		defaultProfile,
 		sdk.GuardianResolution{Action: sdk.GuardianResolutionDeny, RuleScope: sdk.GuardianProfileRuleScopeActionType},
 	)
 
@@ -3862,12 +3973,12 @@ func TestLegacyProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
 			profileMetadataKey:    "ask",
 		},
 	}
-	maps.Copy(grantReq.Metadata, grantConstraintsForRequest(grantReq, sdk.GuardianDecision{
+	maps.Copy(grantReq.Metadata, grantMetadataForRequest(grantReq, sdk.GuardianDecision{
 		Profile: "ask",
 		Metadata: map[string]any{
 			actionTypeMetadataKey: actionFileWrite,
 		},
-	}, true))
+	}))
 	g.grants = []sdk.GuardianGrant{
 		{
 			ID:         "legacy-profile-grant",

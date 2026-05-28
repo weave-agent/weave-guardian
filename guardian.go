@@ -273,6 +273,9 @@ func (g *Guardian) Decide(ctx context.Context, req sdk.GuardianRequest) (sdk.Gua
 	} else {
 		decision.Action = sdk.GuardianDecisionBlock
 		decision.Reason = resolutionReason(resolution, "denied")
+		if resolution.Scope == sdk.GuardianGrantScopeProfile {
+			g.persistProfileRule(approval, decision, resolution)
+		}
 	}
 	decision.Approval = nil
 	g.recordAndPublishDecision(req, decision)
@@ -462,7 +465,7 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 	if overrideOrHardSelected, ok := selectOverrideOrHardBlockRule(req, overlays, profileName, actionTypes); ok {
 		selected = overrideOrHardSelected
-	} else if normalSelected, ok := selectPolicyOverlayRule(req, profileName, overlays, actionTypes, false); ok {
+	} else if normalSelected, ok := selectPolicyOverlayRule(req, overlays, actionTypes, false); ok {
 		selected = normalSelected
 	} else {
 		selected = selectProfilePolicyRule(req, profile, actionTypes, g.cfg.AskFallback)
@@ -494,10 +497,10 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 }
 
-func selectPolicyOverlayRule(req sdk.GuardianRequest, profileName string, overlays []policyOverlay, actionTypes []string, overrideHardBlocks bool) (selectedPolicyRule, bool) {
+func selectPolicyOverlayRule(req sdk.GuardianRequest, overlays []policyOverlay, actionTypes []string, overrideHardBlocks bool) (selectedPolicyRule, bool) {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		rule, overlay, ok := policyOverlayRule(req, profileName, overlays, candidateType, overrideHardBlocks)
+		rule, overlay, ok := policyOverlayRule(req, overlays, candidateType, overrideHardBlocks)
 		if !ok {
 			continue
 		}
@@ -514,12 +517,12 @@ func selectPolicyOverlayRule(req sdk.GuardianRequest, profileName string, overla
 	return selected, selected.actionType != ""
 }
 
-func policyOverlayRule(req sdk.GuardianRequest, profileName string, overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
+func policyOverlayRule(req sdk.GuardianRequest, overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
 	for _, overlay := range slices.Backward(overlays) {
 		if overlay.overlay.OverrideHardBlocks != overrideHardBlocks {
 			continue
 		}
-		if rule, ok := lastMatchingPolicyRule(overlay.rules[actionType], req, profileName, actionType); ok {
+		if rule, ok := lastMatchingPolicyRule(overlay.rules[actionType], req, actionType); ok {
 			return rule, overlay, true
 		}
 	}
@@ -529,7 +532,7 @@ func policyOverlayRule(req sdk.GuardianRequest, profileName string, overlays []p
 func selectOverrideOrHardBlockRule(req sdk.GuardianRequest, overlays []policyOverlay, profileName string, actionTypes []string) (selectedPolicyRule, bool) {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		rule, overlay, ok := policyOverlayRule(req, profileName, overlays, candidateType, true)
+		rule, overlay, ok := policyOverlayRule(req, overlays, candidateType, true)
 		candidate := selectedPolicyRule{
 			actionType: candidateType,
 			rule:       rule,
@@ -566,7 +569,7 @@ func selectProfilePolicyRule(req sdk.GuardianRequest, profile policyProfile, act
 }
 
 func profilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionType string, askFallback bool) selectedPolicyRule {
-	rule, ok := lastMatchingPolicyRule(profile.rules[actionType], req, profile.name, actionType)
+	rule, ok := lastMatchingPolicyRule(profile.rules[actionType], req, actionType)
 	if !ok {
 		decision := sdk.GuardianDecisionBlock
 		if askFallback {
@@ -583,16 +586,16 @@ func profilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionTyp
 	}
 }
 
-func lastMatchingPolicyRule(rules []policyRule, req sdk.GuardianRequest, profileName, actionType string) (policyRule, bool) {
+func lastMatchingPolicyRule(rules []policyRule, req sdk.GuardianRequest, actionType string) (policyRule, bool) {
 	for _, rule := range slices.Backward(rules) {
-		if policyRuleMatchesRequest(rule, req, profileName, actionType) {
+		if policyRuleMatchesRequest(rule, req, actionType) {
 			return rule, true
 		}
 	}
 	return policyRule{}, false
 }
 
-func policyRuleMatchesRequest(rule policyRule, req sdk.GuardianRequest, profileName, actionType string) bool {
+func policyRuleMatchesRequest(rule policyRule, req sdk.GuardianRequest, actionType string) bool {
 	metadata := rule.metadata
 	if metadataString(metadata, grantConstraintsVersionKey) == "" {
 		return true
@@ -603,12 +606,7 @@ func policyRuleMatchesRequest(rule policyRule, req sdk.GuardianRequest, profileN
 	if grantActionType := metadataString(metadata, grantActionTypeKey); grantActionType != "" && grantActionType != actionType {
 		return false
 	}
-	requestConstraints := grantConstraintsForRequest(req, sdk.GuardianDecision{
-		Profile: profileName,
-		Metadata: map[string]any{
-			actionTypeMetadataKey: actionType,
-		},
-	}, false)
+	requestConstraints := requestConstraintsForActionType(req, actionType)
 	return grantConstraintMetadataMatchesRequest(metadata, requestConstraints)
 }
 
@@ -972,7 +970,7 @@ func (g *Guardian) matchingGrant(req sdk.GuardianRequest, decision sdk.GuardianD
 	if actionType == "" {
 		return sdk.GuardianGrant{}, false
 	}
-	requestConstraints := grantConstraintsForRequest(req, decision, false)
+	requestConstraints := requestConstraintsForActionType(req, actionType)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1017,7 +1015,7 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	g.mu.Lock()
 	request.Metadata[profileMetadataKey] = g.cfg.Profile
 	g.mu.Unlock()
-	maps.Copy(request.Metadata, grantConstraintsForRequest(request, decision, true))
+	maps.Copy(request.Metadata, grantMetadataForRequest(request, decision))
 
 	grant := sdk.GuardianGrant{
 		ID:         g.nextIdentifier("grant"),
@@ -1038,7 +1036,7 @@ func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sd
 	updated := cloneGuardianConfig(g.cfg)
 	g.mu.Unlock()
 
-	rule, ok := buildProfileRuleFromApproval(approval, decision, activeProfile, resolution)
+	rule, ok := buildProfileRuleFromApproval(approval, decision, resolution)
 	if !ok {
 		return
 	}
@@ -1080,7 +1078,7 @@ func isBuiltInProfileName(profile string) bool {
 	return profile == defaultProfile || profile == autoProfile || profile == yoloProfile
 }
 
-func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.GuardianDecision, activeProfile string, resolution sdk.GuardianResolution) (sdk.GuardianProfileRule, bool) {
+func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.GuardianDecision, resolution sdk.GuardianResolution) (sdk.GuardianProfileRule, bool) {
 	actionType := metadataString(decision.Metadata, actionTypeMetadataKey)
 	if actionType == "" {
 		actionType = requestActionType(approval.Request)
@@ -1100,11 +1098,12 @@ func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.Gu
 		actionTypeMetadataKey:      actionType,
 		grantConstraintsVersionKey: grantConstraintsVersion,
 		grantActionTypeKey:         actionType,
-		grantProfileKey:            activeProfile,
 	}
 
 	scope := normalizedRuleScope(approval.Request, resolution.RuleScope)
-	addProfileRuleScopeMetadata(metadata, approval.Request, decision, scope)
+	if !addProfileRuleScopeMetadata(metadata, approval.Request, decision, scope) {
+		return sdk.GuardianProfileRule{}, false
+	}
 
 	return sdk.GuardianProfileRule{
 		Decision: ruleDecision,
@@ -1149,41 +1148,52 @@ func defaultRuleScopeForRequest(req sdk.GuardianRequest) sdk.GuardianProfileRule
 	}
 }
 
-func addProfileRuleScopeMetadata(metadata map[string]any, req sdk.GuardianRequest, decision sdk.GuardianDecision, scope sdk.GuardianProfileRuleScope) {
+func addProfileRuleScopeMetadata(metadata map[string]any, req sdk.GuardianRequest, decision sdk.GuardianDecision, scope sdk.GuardianProfileRuleScope) bool {
 	switch scope {
 	case sdk.GuardianProfileRuleScopeExactFile:
 		if path := normalizedRuleRequestPath(req); path != "" {
 			metadata[grantPathExactKey] = path
+			return true
 		}
 	case sdk.GuardianProfileRuleScopeDirectory:
 		if path := normalizedRuleRequestPath(req); path != "" {
 			metadata[grantPathPrefixKey] = filepath.Dir(path)
+			return true
 		}
 	case sdk.GuardianProfileRuleScopeProject:
 		if req.WorkingDir != "" {
 			metadata[grantPathPrefixKey] = normalizeGrantWorkingDir(req.WorkingDir)
+			return true
 		}
 	case sdk.GuardianProfileRuleScopeExactCommand:
 		if command := normalizedExactCommand(req.Command); command != "" {
 			metadata[grantCommandExactKey] = command
+			return true
 		}
 	case sdk.GuardianProfileRuleScopeCommandPrefix:
 		if prefix := commandPrefixForProfileRule(req, decision); prefix != "" {
 			metadata[grantCommandPrefixKey] = prefix
+			return true
 		}
 	case sdk.GuardianProfileRuleScopeCommandFamily:
+		family := commandFamilyForProfileRule(req, decision)
+		if family == "" {
+			return false
+		}
 		if req.WorkingDir != "" {
 			metadata[grantWorkingDirKey] = normalizeGrantWorkingDir(req.WorkingDir)
 		}
-		if family := commandFamilyForProfileRule(req, decision); family != "" {
-			metadata[grantCommandFamilyKey] = family
-		}
+		metadata[grantCommandFamilyKey] = family
+		return true
 	case sdk.GuardianProfileRuleScopeNetworkHost:
 		if host := profileRuleNetworkHost(req, decision); host != "" {
 			metadata[grantNetworkHostKey] = host
+			return true
 		}
 	case sdk.GuardianProfileRuleScopeActionType:
+		return true
 	}
+	return false
 }
 
 func normalizedRuleRequestPath(req sdk.GuardianRequest) string {
@@ -1236,14 +1246,24 @@ func profileRuleNetworkHost(req sdk.GuardianRequest, decision sdk.GuardianDecisi
 	return shellStageNetworkHost(stage)
 }
 
-func grantConstraintsForRequest(req sdk.GuardianRequest, decision sdk.GuardianDecision, persist bool) map[string]any {
-	actionType, _ := decision.Metadata[actionTypeMetadataKey].(string)
-	constraints := make(map[string]any)
-	if persist {
-		constraints[grantConstraintsVersionKey] = grantConstraintsVersion
-		constraints[grantActionTypeKey] = actionType
-		constraints[grantProfileKey] = decision.Profile
+func grantMetadataForRequest(req sdk.GuardianRequest, decision sdk.GuardianDecision) map[string]any {
+	actionType := metadataString(decision.Metadata, actionTypeMetadataKey)
+	constraints := requestConstraintsForActionType(req, actionType)
+	constraints[grantConstraintsVersionKey] = grantConstraintsVersion
+	constraints[grantActionTypeKey] = actionType
+	constraints[grantProfileKey] = decision.Profile
+
+	delete(constraints, grantCommandExactKey)
+	switch actionType {
+	case actionFileRead, actionFileWrite:
+		delete(constraints, grantPathExactKey)
 	}
+
+	return constraints
+}
+
+func requestConstraintsForActionType(req sdk.GuardianRequest, actionType string) map[string]any {
+	constraints := make(map[string]any)
 
 	if req.WorkingDir != "" {
 		constraints[grantWorkingDirKey] = normalizeGrantWorkingDir(req.WorkingDir)
@@ -1259,13 +1279,6 @@ func grantConstraintsForRequest(req sdk.GuardianRequest, decision sdk.GuardianDe
 			constraints[grantNetworkHostKey] = host
 		}
 	case sdk.GuardianActionUnknown:
-	}
-	if persist {
-		delete(constraints, grantCommandExactKey)
-		switch actionType {
-		case actionFileRead, actionFileWrite:
-			delete(constraints, grantPathExactKey)
-		}
 	}
 
 	return constraints

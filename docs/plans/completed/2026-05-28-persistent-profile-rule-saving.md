@@ -1,5 +1,7 @@
 # Guardian Persistent Profile Rule Saving
 
+Status: Completed.
+
 ## Overview
 - Change Guardian profile-scope approvals from runtime-only grants into durable profile rules saved to configuration.
 - Keep Guardian as the owner of policy semantics: TUI provides user intent, Guardian normalizes constraints, rejects unsafe broadening, saves config, reloads policy, and publishes snapshots.
@@ -19,7 +21,7 @@
   - Runtime grants use metadata keys such as `grant_constraints_version`, `grant_action_type`, `grant_working_dir`, `grant_path_prefix`, `grant_path_exact`, `grant_command_family`, and `grant_network_host`.
   - Profile extension uses `metadata.extends` for custom profile inheritance.
 - Dependencies identified:
-  - Requires root `weave` SDK/settings support for active-layer scoped config saving and `GuardianResolution.RuleScope`.
+  - Root `weave` SDK/settings support for active-layer scoped config saving and `GuardianResolution.RuleScope` is available through `github.com/weave-agent/weave v0.0.14`.
   - `weave-tui-guardian` will send selected rule scope in approval resolutions.
 
 ## Development Approach
@@ -117,13 +119,13 @@
 - Saved rule metadata should reuse existing grant constraint keys where possible:
   - `grant_constraints_version`
   - `grant_action_type`
-  - `grant_profile`
   - `grant_working_dir`
   - `grant_path_prefix`
   - `grant_path_exact`
+  - `grant_command_exact`
+  - `grant_command_prefix`
   - `grant_command_family`
   - `grant_network_host`
-- If command exact or command prefix is added, use new metadata keys with tests and document them in code through names, not comments.
 - Profile rules should remain data-only SDK values. Guardian owns normalization and matching.
 - Do not let the UI or root settings package decide whether a Guardian rule is safe.
 

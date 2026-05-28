@@ -33,9 +33,8 @@ Example configuration:
           "reason": "approved host for this profile",
           "metadata": {
             "grant_action_type": "network.read",
-            "grant_constraints_version": "1",
-            "grant_network_host": "registry.npmjs.org",
-            "grant_profile": "team"
+            "grant_constraints_version": "v1",
+            "grant_network_host": "registry.npmjs.org"
           }
         },
         {
@@ -95,13 +94,26 @@ Guardian classifies SDK requests into action types such as:
 
 Shell commands are validated with an AST-backed shell parser, tokenized with quote-aware parsing, shell wrappers such as `bash -c` are unwrapped, and compound commands are decomposed so Guardian can aggregate the riskiest stage. The aggregate order is `block > ask > allow`.
 
+Cloud copy commands classify remote destinations as `network.write` and remote sources as `network.read` for `aws s3 cp|mv|sync` and `gcloud storage cp|rsync`. Credential and auth reads classify as `secret.read`. Guardian skips supported global options and value-taking copy flags such as `--profile`, `--region`, `--project`, `--format`, and `--content-type` while finding the cloud subcommand and copy operands.
+
 Exec decisions include `metadata.action_type` for the selected policy action. They may also include `metadata.stage_action_types` and `metadata.composition_action_type` to explain multi-stage command escalation such as `network.read | shell` becoming `command.exec_remote`.
 
 ## Approvals and Grants
 
 Ask decisions publish ID-based approval requests. Resolutions can allow or deny once, for the current session, or for the active profile. Session grants stay in memory and match future requests by normalized action type plus reusable constraints derived from the original request.
 
-Profile approvals are saved as profile rules in Guardian config instead of as runtime grants. Guardian builds a constrained rule for the selected rule scope, saves it to the active profile, reloads profile policy, and publishes an updated snapshot. Missing or unsupported rule scopes fall back to conservative defaults: exact file for file requests, exact command for exec requests, host for network requests, and action type for other requests. Guardian refuses persisted allow rules for hard-blocked action types.
+Profile approvals are saved as profile rules in Guardian config instead of as runtime grants. Guardian builds a constrained rule for the selected rule scope, saves it to the active profile, reloads profile policy, and publishes an updated snapshot. Missing or unsupported rule scopes fall back to conservative defaults: exact file for file requests, exact command for exec requests, host for network requests, and action type for other requests. Guardian refuses persisted allow rules for hard-blocked action types, and refuses constrained scopes when the request does not contain enough data to build the selected constraint.
+
+Supported `GuardianResolution.RuleScope` values:
+
+- `exact_file`: saves `grant_path_exact`.
+- `directory`: saves `grant_path_prefix` for the requested file's directory.
+- `project`: saves `grant_path_prefix` for the request working directory.
+- `exact_command`: saves `grant_command_exact`.
+- `command_prefix`: saves `grant_command_prefix`.
+- `command_family`: saves `grant_command_family` and, when present, `grant_working_dir`.
+- `network_host`: saves `grant_network_host`.
+- `action_type`: saves only `grant_action_type` and intentionally applies broadly to the selected action type.
 
 In headless mode, ask decisions are blocked immediately without publishing an approval request. Outside headless mode, ask decisions wait up to `approval_timeout`; timeout or context cancellation blocks the action.
 
