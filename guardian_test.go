@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -2933,6 +2934,150 @@ func TestBuildProfileRuleFromApprovalAllowsBlockForHardBlockedActionType(t *test
 	assert.Equal(t, actionCommandExecRemote, rule.Metadata[grantActionTypeKey])
 }
 
+func TestConstrainedSavedFileRuleDoesNotAllowUnrelatedFiles(t *testing.T) {
+	workingDir := t.TempDir()
+	allowedPath := normalizeRequestPath("allowed.txt", workingDir).resolved
+	g := New(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved exact file",
+					Metadata: constrainedRuleMetadata(actionFileWrite, map[string]any{
+						grantPathExactKey: allowedPath,
+					}),
+				}},
+			},
+		},
+	})
+
+	allowed := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-saved-file-allowed",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "allowed.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+	assert.Equal(t, "saved exact file", allowed.Reason)
+
+	unrelated := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-saved-file-unrelated",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "other.txt",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
+	assert.Equal(t, "file writes require approval", unrelated.Reason)
+}
+
+func TestConstrainedSavedCommandRuleDoesNotAllowUnrelatedCommandsOrWorkingDirs(t *testing.T) {
+	workingDir := t.TempDir()
+	g := New(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved npm installs",
+					Metadata: constrainedRuleMetadata(actionPackageInstall, map[string]any{
+						grantWorkingDirKey:    normalizeGrantWorkingDir(workingDir),
+						grantCommandFamilyKey: "npm",
+					}),
+				}},
+			},
+		},
+	})
+
+	allowed := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-saved-command-allowed",
+		Action:     sdk.GuardianActionExec,
+		Command:    "npm install left-pad",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+	assert.Equal(t, "saved npm installs", allowed.Reason)
+
+	otherFamily := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-saved-command-family-mismatch",
+		Action:     sdk.GuardianActionExec,
+		Command:    "yarn add left-pad",
+		WorkingDir: workingDir,
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, otherFamily.Action)
+	assert.Equal(t, "package installs require approval", otherFamily.Reason)
+
+	otherDir := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-saved-command-dir-mismatch",
+		Action:     sdk.GuardianActionExec,
+		Command:    "npm install left-pad",
+		WorkingDir: t.TempDir(),
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, otherDir.Action)
+	assert.Equal(t, "package installs require approval", otherDir.Reason)
+}
+
+func TestConstrainedSavedNetworkRuleDoesNotAllowUnrelatedHosts(t *testing.T) {
+	g := New(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved api host",
+					Metadata: constrainedRuleMetadata(actionNetworkRead, map[string]any{
+						grantNetworkHostKey: "api.example.com",
+					}),
+				}},
+			},
+		},
+	})
+
+	allowed := g.policyDecision(sdk.GuardianRequest{
+		ID:       "req-saved-network-allowed",
+		Action:   sdk.GuardianActionNetwork,
+		Metadata: map[string]any{"url": "https://api.example.com/releases"},
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, allowed.Action)
+	assert.Equal(t, "saved api host", allowed.Reason)
+
+	unrelated := g.policyDecision(sdk.GuardianRequest{
+		ID:       "req-saved-network-unrelated",
+		Action:   sdk.GuardianActionNetwork,
+		Metadata: map[string]any{"url": "https://cdn.example.com/releases"},
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, unrelated.Action)
+	assert.Equal(t, "network reads require approval", unrelated.Reason)
+}
+
+func TestSavedBroadActionTypeRuleAllowsMatchingActionType(t *testing.T) {
+	g := New(Config{
+		Profile: "team",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Metadata: map[string]any{"extends": "ask"},
+				Rules: []sdk.GuardianProfileRule{{
+					Decision: sdk.GuardianDecisionAllow,
+					Reason:   "saved broad writes",
+					Metadata: constrainedRuleMetadata(actionFileWrite, nil),
+				}},
+			},
+		},
+	})
+
+	decision := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-saved-broad-file-write",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "anywhere.txt",
+		WorkingDir: t.TempDir(),
+	})
+	assert.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, "saved broad writes", decision.Reason)
+}
+
 func TestSnapshotDeepCopiesMutableRequestMetadata(t *testing.T) {
 	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
 	bus := newStubBus()
@@ -3945,6 +4090,16 @@ func profileRule(actionType string, decision sdk.GuardianDecisionAction) sdk.Gua
 			actionTypeMetadataKey: actionType,
 		},
 	}
+}
+
+func constrainedRuleMetadata(actionType string, constraints map[string]any) map[string]any {
+	metadata := map[string]any{
+		actionTypeMetadataKey:      actionType,
+		grantConstraintsVersionKey: grantConstraintsVersion,
+		grantActionTypeKey:         actionType,
+	}
+	maps.Copy(metadata, constraints)
+	return metadata
 }
 
 func policyDecisionForActionType(g *Guardian, actionType string) sdk.GuardianDecision {

@@ -54,12 +54,13 @@ type Config struct {
 type policyProfile struct {
 	name        string
 	description string
-	rules       map[string]policyRule
+	rules       map[string][]policyRule
 }
 
 type policyRule struct {
 	decision sdk.GuardianDecisionAction
 	reason   string
+	metadata map[string]any
 }
 
 type selectedPolicyRule struct {
@@ -71,7 +72,7 @@ type selectedPolicyRule struct {
 
 type policyOverlay struct {
 	overlay sdk.GuardianPolicyOverlay
-	rules   map[string]policyRule
+	rules   map[string][]policyRule
 }
 
 // Guardian owns action classification, policy decisions, approvals, grants, and
@@ -394,8 +395,8 @@ func (g *Guardian) removePolicyOverlayLocked(id string) {
 	}
 }
 
-func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string]policyRule {
-	rules := make(map[string]policyRule)
+func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string][]policyRule {
+	rules := make(map[string][]policyRule)
 	for _, rule := range overlay.Rules {
 		actionTypes := overlayRuleActionTypes(rule)
 		if len(actionTypes) == 0 {
@@ -406,10 +407,11 @@ func compileOverlayRules(overlay sdk.GuardianPolicyOverlay) map[string]policyRul
 			reason = fmt.Sprintf("policy overlay %s overrides action", overlay.ID)
 		}
 		for _, actionType := range actionTypes {
-			rules[actionType] = policyRule{
+			rules[actionType] = append(rules[actionType], policyRule{
 				decision: normalizeDecision(rule.Decision),
 				reason:   reason,
-			}
+				metadata: maps.Clone(rule.Metadata),
+			})
 		}
 	}
 	return rules
@@ -458,12 +460,12 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 			reason:   "all stages allowed",
 		},
 	}
-	if overrideOrHardSelected, ok := selectOverrideOrHardBlockRule(overlays, profileName, actionTypes); ok {
+	if overrideOrHardSelected, ok := selectOverrideOrHardBlockRule(req, overlays, profileName, actionTypes); ok {
 		selected = overrideOrHardSelected
-	} else if normalSelected, ok := selectPolicyOverlayRule(overlays, actionTypes, false); ok {
+	} else if normalSelected, ok := selectPolicyOverlayRule(req, profileName, overlays, actionTypes, false); ok {
 		selected = normalSelected
 	} else {
-		selected = selectProfilePolicyRule(profile, actionTypes, g.cfg.AskFallback)
+		selected = selectProfilePolicyRule(req, profile, actionTypes, g.cfg.AskFallback)
 	}
 
 	metadata := map[string]any{
@@ -492,10 +494,10 @@ func (g *Guardian) policyDecisionForActionTypesWithClassification(req sdk.Guardi
 	}
 }
 
-func selectPolicyOverlayRule(overlays []policyOverlay, actionTypes []string, overrideHardBlocks bool) (selectedPolicyRule, bool) {
+func selectPolicyOverlayRule(req sdk.GuardianRequest, profileName string, overlays []policyOverlay, actionTypes []string, overrideHardBlocks bool) (selectedPolicyRule, bool) {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		rule, overlay, ok := policyOverlayRule(overlays, candidateType, overrideHardBlocks)
+		rule, overlay, ok := policyOverlayRule(req, profileName, overlays, candidateType, overrideHardBlocks)
 		if !ok {
 			continue
 		}
@@ -512,23 +514,22 @@ func selectPolicyOverlayRule(overlays []policyOverlay, actionTypes []string, ove
 	return selected, selected.actionType != ""
 }
 
-func policyOverlayRule(overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
+func policyOverlayRule(req sdk.GuardianRequest, profileName string, overlays []policyOverlay, actionType string, overrideHardBlocks bool) (policyRule, policyOverlay, bool) {
 	for _, overlay := range slices.Backward(overlays) {
 		if overlay.overlay.OverrideHardBlocks != overrideHardBlocks {
 			continue
 		}
-		rule, ok := overlay.rules[actionType]
-		if ok {
+		if rule, ok := lastMatchingPolicyRule(overlay.rules[actionType], req, profileName, actionType); ok {
 			return rule, overlay, true
 		}
 	}
 	return policyRule{}, policyOverlay{}, false
 }
 
-func selectOverrideOrHardBlockRule(overlays []policyOverlay, profileName string, actionTypes []string) (selectedPolicyRule, bool) {
+func selectOverrideOrHardBlockRule(req sdk.GuardianRequest, overlays []policyOverlay, profileName string, actionTypes []string) (selectedPolicyRule, bool) {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		rule, overlay, ok := policyOverlayRule(overlays, candidateType, true)
+		rule, overlay, ok := policyOverlayRule(req, profileName, overlays, candidateType, true)
 		candidate := selectedPolicyRule{
 			actionType: candidateType,
 			rule:       rule,
@@ -552,10 +553,10 @@ func selectOverrideOrHardBlockRule(overlays []policyOverlay, profileName string,
 	return selected, selected.actionType != ""
 }
 
-func selectProfilePolicyRule(profile policyProfile, actionTypes []string, askFallback bool) selectedPolicyRule {
+func selectProfilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionTypes []string, askFallback bool) selectedPolicyRule {
 	var selected selectedPolicyRule
 	for _, candidateType := range actionTypes {
-		candidate := profilePolicyRule(profile, candidateType, askFallback)
+		candidate := profilePolicyRule(req, profile, candidateType, askFallback)
 		rule := candidate.rule
 		if shouldUseDecision(candidateType, rule, selected.actionType, selected.rule) {
 			selected = candidate
@@ -564,8 +565,8 @@ func selectProfilePolicyRule(profile policyProfile, actionTypes []string, askFal
 	return selected
 }
 
-func profilePolicyRule(profile policyProfile, actionType string, askFallback bool) selectedPolicyRule {
-	rule, ok := profile.rules[actionType]
+func profilePolicyRule(req sdk.GuardianRequest, profile policyProfile, actionType string, askFallback bool) selectedPolicyRule {
+	rule, ok := lastMatchingPolicyRule(profile.rules[actionType], req, profile.name, actionType)
 	if !ok {
 		decision := sdk.GuardianDecisionBlock
 		if askFallback {
@@ -580,6 +581,35 @@ func profilePolicyRule(profile policyProfile, actionType string, askFallback boo
 		actionType: actionType,
 		rule:       rule,
 	}
+}
+
+func lastMatchingPolicyRule(rules []policyRule, req sdk.GuardianRequest, profileName, actionType string) (policyRule, bool) {
+	for i := len(rules) - 1; i >= 0; i-- {
+		if policyRuleMatchesRequest(rules[i], req, profileName, actionType) {
+			return rules[i], true
+		}
+	}
+	return policyRule{}, false
+}
+
+func policyRuleMatchesRequest(rule policyRule, req sdk.GuardianRequest, profileName, actionType string) bool {
+	metadata := rule.metadata
+	if metadataString(metadata, grantConstraintsVersionKey) == "" {
+		return true
+	}
+	if metadataString(metadata, grantConstraintsVersionKey) != grantConstraintsVersion {
+		return false
+	}
+	if grantActionType := metadataString(metadata, grantActionTypeKey); grantActionType != "" && grantActionType != actionType {
+		return false
+	}
+	requestConstraints := grantConstraintsForRequest(req, sdk.GuardianDecision{
+		Profile: profileName,
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionType,
+		},
+	}, false)
+	return grantConstraintMetadataMatchesRequest(metadata, requestConstraints)
 }
 
 func resolveProfiles(custom map[string]sdk.GuardianProfile) map[string]policyProfile {
@@ -631,10 +661,11 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 			if _, hard := hardBlockRule(actionType); hard {
 				continue
 			}
-			rules[actionType] = policyRule{
+			rules[actionType] = append(rules[actionType], policyRule{
 				decision: normalizeDecision(decision),
 				reason:   reason,
-			}
+				metadata: maps.Clone(override.Metadata),
+			})
 		}
 	}
 
@@ -642,10 +673,10 @@ func resolveCustomProfile(name string, custom map[string]sdk.GuardianProfile, pr
 		if _, hard := hardBlockRule(actionType); hard {
 			continue
 		}
-		rules[actionType] = policyRule{
+		rules[actionType] = append(rules[actionType], policyRule{
 			decision: normalizeDecision(sdk.GuardianDecisionAction(decision)),
 			reason:   fmt.Sprintf("custom profile %s overrides %s", name, actionType),
-		}
+		})
 	}
 
 	profile := policyProfile{
@@ -714,37 +745,37 @@ func legacyProfileActions(profile sdk.GuardianProfile) map[string]string {
 func builtInProfiles() map[string]policyProfile {
 	hardBlocks := hardBlockReasons()
 
-	askRules := map[string]policyRule{
-		"file.read":              allowRule("project file reads are allowed"),
-		"git.read":               allowRule("git read operations are allowed"),
-		"command.read":           allowRule("read-only commands are allowed"),
-		"package.test":           allowRule("test commands are allowed"),
-		"package.build":          allowRule("build commands are allowed"),
-		"policy.read":            allowRule("policy reads are allowed"),
-		"file.write":             askRule("file writes require approval"),
-		"file.delete":            askRule("file deletes require approval"),
-		"git.write":              askRule("git write operations require approval"),
-		"git.discard":            askRule("git discard operations require approval"),
-		"git.remote_write":       askRule("git remote writes require approval"),
-		"git.history_rewrite":    askRule("git history rewrites require approval"),
-		"command.write":          askRule("write commands require approval"),
-		"command.exec_local":     askRule("local command execution requires approval"),
-		"network.read":           askRule("network reads require approval"),
-		"network.write":          askRule("network writes require approval"),
-		"package.install":        askRule("package installs require approval"),
-		"package.global_install": askRule("global package installs require approval"),
-		"package.script":         askRule("package scripts require approval"),
-		"secret.read":            askRule("secret reads require approval"),
-		"system.process_signal":  askRule("process signal operations require approval"),
-		"system.service_change":  askRule("service changes require approval"),
-		"unknown":                askRule("unknown actions require approval"),
+	askRules := map[string][]policyRule{
+		"file.read":              {allowRule("project file reads are allowed")},
+		"git.read":               {allowRule("git read operations are allowed")},
+		"command.read":           {allowRule("read-only commands are allowed")},
+		"package.test":           {allowRule("test commands are allowed")},
+		"package.build":          {allowRule("build commands are allowed")},
+		"policy.read":            {allowRule("policy reads are allowed")},
+		"file.write":             {askRule("file writes require approval")},
+		"file.delete":            {askRule("file deletes require approval")},
+		"git.write":              {askRule("git write operations require approval")},
+		"git.discard":            {askRule("git discard operations require approval")},
+		"git.remote_write":       {askRule("git remote writes require approval")},
+		"git.history_rewrite":    {askRule("git history rewrites require approval")},
+		"command.write":          {askRule("write commands require approval")},
+		"command.exec_local":     {askRule("local command execution requires approval")},
+		"network.read":           {askRule("network reads require approval")},
+		"network.write":          {askRule("network writes require approval")},
+		"package.install":        {askRule("package installs require approval")},
+		"package.global_install": {askRule("global package installs require approval")},
+		"package.script":         {askRule("package scripts require approval")},
+		"secret.read":            {askRule("secret reads require approval")},
+		"system.process_signal":  {askRule("process signal operations require approval")},
+		"system.service_change":  {askRule("service changes require approval")},
+		"unknown":                {askRule("unknown actions require approval")},
 	}
 	for actionType, reason := range hardBlocks {
 		if canApproveHardCommand(actionType) {
-			askRules[actionType] = askRule(hardCommandApprovalReason(actionType, reason))
+			askRules[actionType] = []policyRule{askRule(hardCommandApprovalReason(actionType, reason))}
 			continue
 		}
-		askRules[actionType] = blockRule(reason)
+		askRules[actionType] = []policyRule{blockRule(reason)}
 	}
 
 	autoRules := copyRules(askRules)
@@ -757,16 +788,16 @@ func builtInProfiles() map[string]policyProfile {
 		"package.install",
 		"package.script",
 	} {
-		autoRules[actionType] = allowRule(actionType + " is allowed by auto profile")
+		autoRules[actionType] = append(autoRules[actionType], allowRule(actionType+" is allowed by auto profile"))
 	}
 
-	yoloRules := make(map[string]policyRule, len(askRules))
+	yoloRules := make(map[string][]policyRule, len(askRules))
 	for actionType := range askRules {
-		yoloRules[actionType] = allowRule(actionType + " is allowed by yolo profile")
+		yoloRules[actionType] = []policyRule{allowRule(actionType + " is allowed by yolo profile")}
 	}
-	yoloRules["unknown"] = allowRule("unknown actions are allowed by yolo profile")
+	yoloRules["unknown"] = []policyRule{allowRule("unknown actions are allowed by yolo profile")}
 	for actionType, reason := range hardBlocks {
-		yoloRules[actionType] = allowRule(reason)
+		yoloRules[actionType] = []policyRule{allowRule(reason)}
 	}
 
 	return map[string]policyProfile{
@@ -1204,6 +1235,13 @@ func grantConstraintsForRequest(req sdk.GuardianRequest, decision sdk.GuardianDe
 		}
 	case sdk.GuardianActionUnknown:
 	}
+	if persist {
+		delete(constraints, grantCommandExactKey)
+		switch actionType {
+		case actionFileRead, actionFileWrite:
+			delete(constraints, grantPathExactKey)
+		}
+	}
 
 	return constraints
 }
@@ -1220,6 +1258,10 @@ func grantMatchesRequest(grantReq sdk.GuardianRequest, actionType string, reques
 		return false
 	}
 
+	return grantConstraintMetadataMatchesRequest(grantMetadata, requestConstraints)
+}
+
+func grantConstraintMetadataMatchesRequest(grantMetadata, requestConstraints map[string]any) bool {
 	if !constraintStringMatches(grantMetadata, requestConstraints, grantWorkingDirKey) {
 		return false
 	}
@@ -1228,6 +1270,15 @@ func grantMatchesRequest(grantReq sdk.GuardianRequest, actionType string, reques
 	}
 	if !constraintStringMatches(grantMetadata, requestConstraints, grantNetworkHostKey) {
 		return false
+	}
+	if exact := metadataString(grantMetadata, grantCommandExactKey); exact != "" && metadataString(requestConstraints, grantCommandExactKey) != exact {
+		return false
+	}
+	if prefix := metadataString(grantMetadata, grantCommandPrefixKey); prefix != "" {
+		requestCommand := metadataString(requestConstraints, grantCommandExactKey)
+		if requestCommand != prefix && !strings.HasPrefix(requestCommand, prefix+" ") {
+			return false
+		}
 	}
 	if exact := metadataString(grantMetadata, grantPathExactKey); exact != "" && metadataString(requestConstraints, grantPathExactKey) != exact {
 		return false
@@ -1257,15 +1308,18 @@ func addFileGrantPathConstraint(constraints map[string]any, actionType, rawPath,
 	if normalized == "" {
 		return
 	}
+	constraints[grantPathExactKey] = normalized
 	switch actionType {
 	case actionFileRead, actionFileWrite:
 		constraints[grantPathPrefixKey] = filepath.Dir(normalized)
 	case actionFileDelete, actionSecretRead:
-		constraints[grantPathExactKey] = normalized
 	}
 }
 
 func addExecGrantConstraints(constraints map[string]any, req sdk.GuardianRequest, actionType string) {
+	if command := normalizedExactCommand(req.Command); command != "" {
+		constraints[grantCommandExactKey] = command
+	}
 	stage, ok := selectedShellStage(req.Command, req.WorkingDir, actionType)
 	if !ok {
 		return
@@ -1673,10 +1727,23 @@ func blockRule(reason string) policyRule {
 	return policyRule{decision: sdk.GuardianDecisionBlock, reason: reason}
 }
 
-func copyRules(in map[string]policyRule) map[string]policyRule {
-	out := make(map[string]policyRule, len(in))
-	maps.Copy(out, in)
+func copyRules(in map[string][]policyRule) map[string][]policyRule {
+	out := make(map[string][]policyRule, len(in))
+	for actionType, rules := range in {
+		out[actionType] = clonePolicyRules(rules)
+	}
+	return out
+}
 
+func clonePolicyRules(in []policyRule) []policyRule {
+	out := make([]policyRule, len(in))
+	for i, rule := range in {
+		out[i] = policyRule{
+			decision: rule.decision,
+			reason:   rule.reason,
+			metadata: maps.Clone(rule.metadata),
+		}
+	}
 	return out
 }
 
@@ -1684,14 +1751,20 @@ func sdkProfiles(profiles map[string]policyProfile) map[string]sdk.GuardianProfi
 	out := make(map[string]sdk.GuardianProfile, len(profiles))
 	for name, profile := range profiles {
 		rules := make([]sdk.GuardianProfileRule, 0, len(profile.rules))
-		for actionType, rule := range profile.rules {
-			rules = append(rules, sdk.GuardianProfileRule{
-				Decision: rule.decision,
-				Reason:   rule.reason,
-				Metadata: map[string]any{
-					actionTypeMetadataKey: actionType,
-				},
-			})
+		for actionType, compiledRules := range profile.rules {
+			for i := len(compiledRules) - 1; i >= 0; i-- {
+				rule := compiledRules[i]
+				metadata := maps.Clone(rule.metadata)
+				if metadata == nil {
+					metadata = make(map[string]any)
+				}
+				metadata[actionTypeMetadataKey] = actionType
+				rules = append(rules, sdk.GuardianProfileRule{
+					Decision: rule.decision,
+					Reason:   rule.reason,
+					Metadata: metadata,
+				})
+			}
 		}
 		out[name] = sdk.GuardianProfile{
 			Name:        profile.name,

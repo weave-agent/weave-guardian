@@ -83,15 +83,15 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 4: Match constrained persisted profile rules
-- [ ] extend compiled policy rules to carry constraint metadata, not only decision and reason
-- [ ] update profile rule compilation to retain persisted grant constraints from rule metadata
-- [ ] update policy decision matching so constrained rules use the same matching semantics as runtime grants
-- [ ] keep legacy action-type-only rules working as broad rules for existing configs
-- [ ] ensure broad action-type-only rules only occur when config already has no constraints or user explicitly selected broad action scope
-- [ ] write tests that constrained saved file rules do not allow unrelated files
-- [ ] write tests that constrained saved command rules do not allow unrelated command families or working dirs
-- [ ] write tests that constrained saved network rules do not allow unrelated hosts
-- [ ] run `go test ./...` - must pass before next task
+- [x] extend compiled policy rules to carry constraint metadata, not only decision and reason
+- [x] update profile rule compilation to retain persisted grant constraints from rule metadata
+- [x] update policy decision matching so constrained rules use the same matching semantics as runtime grants
+- [x] keep legacy action-type-only rules working as broad rules for existing configs
+- [x] ensure broad action-type-only rules only occur when config already has no constraints or user explicitly selected broad action scope
+- [x] write tests that constrained saved file rules do not allow unrelated files
+- [x] write tests that constrained saved command rules do not allow unrelated command families or working dirs
+- [x] write tests that constrained saved network rules do not allow unrelated hosts
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 5: Allow saved additions to built-in profiles
 - [ ] update `resolveCustomProfile` so custom config entries named `ask`, `auto`, or `yolo` can extend/override their built-in base instead of being ignored
