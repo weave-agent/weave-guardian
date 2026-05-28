@@ -60,15 +60,15 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 2: Convert approval rule scope into constrained profile rules
-- [ ] add a function that builds `sdk.GuardianProfileRule` from approval, decision, active profile, and `GuardianResolution.RuleScope`
-- [ ] map file scopes to `grant_path_exact`, `grant_path_prefix`, project root prefix, or explicit action-type-only metadata
-- [ ] map command scopes to exact command metadata, command prefix metadata, command family plus working dir, or explicit action-type-only metadata
-- [ ] map network scopes to host constraints or explicit action-type-only metadata
-- [ ] default missing rule scope to a conservative scope derived from the request type
-- [ ] reject persisted allow rules for hard-blocked action types
-- [ ] write tests for file exact, file directory, file project, command exact, command family, network host, and broad action rules
-- [ ] write tests for hard-block rejection and unknown/unsupported rule-scope fallback
-- [ ] run `go test ./...` - must pass before next task
+- [x] add a function that builds `sdk.GuardianProfileRule` from approval, decision, active profile, and `GuardianResolution.RuleScope`
+- [x] map file scopes to `grant_path_exact`, `grant_path_prefix`, project root prefix, or explicit action-type-only metadata
+- [x] map command scopes to exact command metadata, command prefix metadata, command family plus working dir, or explicit action-type-only metadata
+- [x] map network scopes to host constraints or explicit action-type-only metadata
+- [x] default missing rule scope to a conservative scope derived from the request type
+- [x] reject persisted allow rules for hard-blocked action types
+- [x] write tests for file exact, file directory, file project, command exact, command family, network host, and broad action rules
+- [x] write tests for hard-block rejection and unknown/unsupported rule-scope fallback
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 3: Persist profile rules to active config
 - [ ] change `applyGrant` so `GuardianGrantScopeProfile` saves a profile rule instead of only appending an in-memory grant

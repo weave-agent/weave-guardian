@@ -37,6 +37,8 @@ const (
 	grantWorkingDirKey         = "grant_working_dir"
 	grantPathPrefixKey         = "grant_path_prefix"
 	grantPathExactKey          = "grant_path_exact"
+	grantCommandExactKey       = "grant_command_exact"
+	grantCommandPrefixKey      = "grant_command_prefix"
 	grantCommandFamilyKey      = "grant_command_family"
 	grantNetworkHostKey        = "grant_network_host"
 )
@@ -968,6 +970,162 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	g.mu.Lock()
 	g.grants = append(g.grants, grant)
 	g.mu.Unlock()
+}
+
+func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.GuardianDecision, activeProfile string, resolution sdk.GuardianResolution) (sdk.GuardianProfileRule, bool) {
+	actionType := metadataString(decision.Metadata, actionTypeMetadataKey)
+	if actionType == "" {
+		actionType = requestActionType(approval.Request)
+	}
+	ruleDecision := profileRuleDecisionFromResolution(resolution)
+	if ruleDecision == sdk.GuardianDecisionAllow {
+		if _, hard := hardBlockRule(actionType); hard {
+			return sdk.GuardianProfileRule{}, false
+		}
+	}
+	reason := resolutionReason(resolution, decision.Reason)
+	if reason == "" {
+		reason = "approved"
+	}
+
+	metadata := map[string]any{
+		actionTypeMetadataKey:      actionType,
+		grantConstraintsVersionKey: grantConstraintsVersion,
+		grantActionTypeKey:         actionType,
+		grantProfileKey:            activeProfile,
+	}
+
+	scope := normalizedRuleScope(approval.Request, resolution.RuleScope)
+	addProfileRuleScopeMetadata(metadata, approval.Request, decision, scope)
+
+	return sdk.GuardianProfileRule{
+		Decision: ruleDecision,
+		Reason:   reason,
+		Metadata: metadata,
+	}, true
+}
+
+func profileRuleDecisionFromResolution(resolution sdk.GuardianResolution) sdk.GuardianDecisionAction {
+	if resolution.Action == sdk.GuardianResolutionDeny {
+		return sdk.GuardianDecisionBlock
+	}
+	return sdk.GuardianDecisionAllow
+}
+
+func normalizedRuleScope(req sdk.GuardianRequest, requested sdk.GuardianProfileRuleScope) sdk.GuardianProfileRuleScope {
+	switch requested {
+	case sdk.GuardianProfileRuleScopeExactFile,
+		sdk.GuardianProfileRuleScopeDirectory,
+		sdk.GuardianProfileRuleScopeProject,
+		sdk.GuardianProfileRuleScopeExactCommand,
+		sdk.GuardianProfileRuleScopeCommandPrefix,
+		sdk.GuardianProfileRuleScopeCommandFamily,
+		sdk.GuardianProfileRuleScopeNetworkHost,
+		sdk.GuardianProfileRuleScopeActionType:
+		return requested
+	default:
+		return defaultRuleScopeForRequest(req)
+	}
+}
+
+func defaultRuleScopeForRequest(req sdk.GuardianRequest) sdk.GuardianProfileRuleScope {
+	switch req.Action {
+	case sdk.GuardianActionRead, sdk.GuardianActionWrite, sdk.GuardianActionDelete:
+		return sdk.GuardianProfileRuleScopeExactFile
+	case sdk.GuardianActionExec:
+		return sdk.GuardianProfileRuleScopeExactCommand
+	case sdk.GuardianActionNetwork:
+		return sdk.GuardianProfileRuleScopeNetworkHost
+	default:
+		return sdk.GuardianProfileRuleScopeActionType
+	}
+}
+
+func addProfileRuleScopeMetadata(metadata map[string]any, req sdk.GuardianRequest, decision sdk.GuardianDecision, scope sdk.GuardianProfileRuleScope) {
+	switch scope {
+	case sdk.GuardianProfileRuleScopeExactFile:
+		if path := normalizedRuleRequestPath(req); path != "" {
+			metadata[grantPathExactKey] = path
+		}
+	case sdk.GuardianProfileRuleScopeDirectory:
+		if path := normalizedRuleRequestPath(req); path != "" {
+			metadata[grantPathPrefixKey] = filepath.Dir(path)
+		}
+	case sdk.GuardianProfileRuleScopeProject:
+		if req.WorkingDir != "" {
+			metadata[grantPathPrefixKey] = normalizeGrantWorkingDir(req.WorkingDir)
+		}
+	case sdk.GuardianProfileRuleScopeExactCommand:
+		if command := normalizedExactCommand(req.Command); command != "" {
+			metadata[grantCommandExactKey] = command
+		}
+	case sdk.GuardianProfileRuleScopeCommandPrefix:
+		if prefix := commandPrefixForProfileRule(req, decision); prefix != "" {
+			metadata[grantCommandPrefixKey] = prefix
+		}
+	case sdk.GuardianProfileRuleScopeCommandFamily:
+		if req.WorkingDir != "" {
+			metadata[grantWorkingDirKey] = normalizeGrantWorkingDir(req.WorkingDir)
+		}
+		if family := commandFamilyForProfileRule(req, decision); family != "" {
+			metadata[grantCommandFamilyKey] = family
+		}
+	case sdk.GuardianProfileRuleScopeNetworkHost:
+		if host := profileRuleNetworkHost(req, decision); host != "" {
+			metadata[grantNetworkHostKey] = host
+		}
+	case sdk.GuardianProfileRuleScopeActionType:
+	}
+}
+
+func normalizedRuleRequestPath(req sdk.GuardianRequest) string {
+	if req.Path == "" {
+		return ""
+	}
+	return normalizeRequestPath(req.Path, req.WorkingDir).resolved
+}
+
+func normalizedExactCommand(command string) string {
+	return strings.TrimSpace(command)
+}
+
+func commandFamilyForProfileRule(req sdk.GuardianRequest, decision sdk.GuardianDecision) string {
+	actionType := metadataString(decision.Metadata, actionTypeMetadataKey)
+	stage, ok := selectedShellStage(req.Command, req.WorkingDir, actionType)
+	if !ok || len(stage.Tokens) == 0 {
+		return ""
+	}
+	return normalizedCommandName(stage.Tokens[0])
+}
+
+func commandPrefixForProfileRule(req sdk.GuardianRequest, decision sdk.GuardianDecision) string {
+	actionType := metadataString(decision.Metadata, actionTypeMetadataKey)
+	stage, ok := selectedShellStage(req.Command, req.WorkingDir, actionType)
+	if !ok || len(stage.Tokens) == 0 {
+		return normalizedExactCommand(req.Command)
+	}
+
+	parts := []string{normalizedCommandName(stage.Tokens[0])}
+	for _, token := range stage.Tokens[1:] {
+		if strings.HasPrefix(token, "-") {
+			continue
+		}
+		parts = append(parts, token)
+		break
+	}
+	return strings.Join(parts, " ")
+}
+
+func profileRuleNetworkHost(req sdk.GuardianRequest, decision sdk.GuardianDecision) string {
+	if host := requestNetworkHost(req); host != "" {
+		return host
+	}
+	actionType := metadataString(decision.Metadata, actionTypeMetadataKey)
+	stage, ok := selectedShellStage(req.Command, req.WorkingDir, actionType)
+	if !ok {
+		return ""
+	}
+	return shellStageNetworkHost(stage)
 }
 
 func grantConstraintsForRequest(req sdk.GuardianRequest, decision sdk.GuardianDecision, persist bool) map[string]any {
