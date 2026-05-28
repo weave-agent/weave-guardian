@@ -71,16 +71,16 @@
 - [x] run `go test ./...` - must pass before next task
 
 ### Task 3: Persist profile rules to active config
-- [ ] change `applyGrant` so `GuardianGrantScopeProfile` saves a profile rule instead of only appending an in-memory grant
-- [ ] preserve `GuardianGrantScopeSession` as runtime-only grants
-- [ ] append rules to `Config.Profiles[activeProfile].Rules`, creating the profile if needed
-- [ ] preserve existing profile metadata and set default `metadata.extends` when saving into a built-in profile name
-- [ ] call scoped config save with the updated Guardian config and handle save errors by not silently broadening policy
-- [ ] reload `g.profiles` from the updated config after a successful save
-- [ ] publish an updated Guardian snapshot after a successful save
-- [ ] write tests that profile approvals call the writer with expected guardian config
-- [ ] write tests that save failures do not add runtime grants or policy allows
-- [ ] run `go test ./...` - must pass before next task
+- [x] change `applyGrant` so `GuardianGrantScopeProfile` saves a profile rule instead of only appending an in-memory grant
+- [x] preserve `GuardianGrantScopeSession` as runtime-only grants
+- [x] append rules to `Config.Profiles[activeProfile].Rules`, creating the profile if needed
+- [x] preserve existing profile metadata and set default `metadata.extends` when saving into a built-in profile name
+- [x] call scoped config save with the updated Guardian config and handle save errors by not silently broadening policy
+- [x] reload `g.profiles` from the updated config after a successful save
+- [x] publish an updated Guardian snapshot after a successful save
+- [x] write tests that profile approvals call the writer with expected guardian config
+- [x] write tests that save failures do not add runtime grants or policy allows
+- [x] run `go test ./...` - must pass before next task
 
 ### Task 4: Match constrained persisted profile rules
 - [ ] extend compiled policy rules to carry constraint metadata, not only decision and reason

@@ -2,6 +2,7 @@ package guardian
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,6 +55,8 @@ type configStub struct {
 	savedExtensionScope  string
 	savedExtensionName   string
 	savedExtensionTarget any
+	saveErr              error
+	saveCount            int
 }
 
 func (c *configStub) FilePath() string   { return "" }
@@ -80,8 +83,9 @@ func (c *configStub) SaveExtensionConfig(scope, name string, target any) error {
 	c.savedExtensionScope = scope
 	c.savedExtensionName = name
 	c.savedExtensionTarget = target
+	c.saveCount++
 
-	return nil
+	return c.saveErr
 }
 
 type writerlessConfigStub struct {
@@ -2540,6 +2544,139 @@ func TestSnapshotIncludesSessionGrants(t *testing.T) {
 	assert.NotEmpty(t, snapshot.Grants[0].CreatedAt)
 }
 
+func TestProfileApprovalPersistsRuleToConfigWriter(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{
+		Profile:         "team",
+		ApprovalTimeout: "1s",
+		Profiles: map[string]sdk.GuardianProfile{
+			"team": {
+				Name: "team",
+				Metadata: map[string]any{
+					"extends": "ask",
+					"owner":   "engineering",
+				},
+			},
+		},
+	}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action:    sdk.GuardianResolutionAllow,
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+			Reason:    "persist exact file",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	workingDir := t.TempDir()
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-profile-save",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+
+	assert.Equal(t, 1, writer.saveCount)
+	assert.Equal(t, extensionName, writer.savedExtensionScope)
+	assert.Equal(t, extensionName, writer.savedExtensionName)
+	saved, ok := writer.savedExtensionTarget.(Config)
+	require.True(t, ok)
+	require.Contains(t, saved.Profiles, "team")
+	savedProfile := saved.Profiles["team"]
+	assert.Equal(t, "team", savedProfile.Name)
+	assert.Equal(t, "ask", savedProfile.Metadata["extends"])
+	assert.Equal(t, "engineering", savedProfile.Metadata["owner"])
+	require.Len(t, savedProfile.Rules, 1)
+	assert.Equal(t, sdk.GuardianDecisionAllow, savedProfile.Rules[0].Decision)
+	assert.Equal(t, "persist exact file", savedProfile.Rules[0].Reason)
+	assert.Equal(t, actionFileWrite, savedProfile.Rules[0].Metadata[grantActionTypeKey])
+	assert.Equal(t, "team", savedProfile.Rules[0].Metadata[grantProfileKey])
+	assert.Equal(t, normalizeRequestPath("out.txt", workingDir).resolved, savedProfile.Rules[0].Metadata[grantPathExactKey])
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
+	require.Contains(t, snapshot.Profiles, "team")
+	assertPublishedSnapshot(t, bus)
+}
+
+func TestProfileApprovalCreatesBuiltInProfileConfigWithDefaultExtends(t *testing.T) {
+	writer := &configStub{}
+	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action:    sdk.GuardianResolutionAllow,
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeExactFile,
+			Reason:    "persist ask rule",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	_, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-built-in-profile-save",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	saved, ok := writer.savedExtensionTarget.(Config)
+	require.True(t, ok)
+	require.Contains(t, saved.Profiles, "ask")
+	assert.Equal(t, "ask", saved.Profiles["ask"].Name)
+	assert.Equal(t, "ask", saved.Profiles["ask"].Metadata["extends"])
+	require.Len(t, saved.Profiles["ask"].Rules, 1)
+}
+
+func TestProfileApprovalSaveFailureDoesNotAddRuntimeGrantOrPolicyAllow(t *testing.T) {
+	saveErr := errors.New("save failed")
+	writer := &configStub{saveErr: saveErr}
+	g := newGuardianWithWriter(Config{Profile: "ask", ApprovalTimeout: "1s"}, false, writer)
+	bus := newStubBus()
+	bus.On(sdk.GuardianApprovalRequestTopic, func(ev sdk.Event) error {
+		payload := ev.Payload.(sdk.GuardianApprovalRequest)
+		return g.Resolve(context.Background(), payload.Approval.DecisionID, sdk.GuardianResolution{
+			Action:    sdk.GuardianResolutionAllow,
+			Scope:     sdk.GuardianGrantScopeProfile,
+			RuleScope: sdk.GuardianProfileRuleScopeActionType,
+			Reason:    "persist broad file write",
+		})
+	})
+	require.NoError(t, g.Subscribe(bus))
+
+	decision, err := g.Decide(context.Background(), sdk.GuardianRequest{
+		ID:         "req-profile-save-fails",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, sdk.GuardianDecisionAllow, decision.Action)
+	assert.Equal(t, 1, writer.saveCount)
+
+	snapshot, err := g.Snapshot(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Grants)
+	assert.Empty(t, g.cfg.Profiles)
+
+	next := g.policyDecision(sdk.GuardianRequest{
+		ID:         "req-profile-save-fails-next",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "next.txt",
+		WorkingDir: t.TempDir(),
+	})
+	assert.Equal(t, sdk.GuardianDecisionAsk, next.Action)
+	assertNotPublishedSnapshot(t, bus)
+}
+
 func TestBuildProfileRuleFromApprovalMapsRuleScopes(t *testing.T) {
 	workingDir := t.TempDir()
 	filePath := filepath.Join("subdir", "out.txt")
@@ -3334,7 +3471,7 @@ func TestSessionGrantExecCommandFamilyAndWorkingDirMustMatch(t *testing.T) {
 	assert.Equal(t, 3, approvalRequests)
 }
 
-func TestProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
+func TestLegacyProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
 	g := New(Config{Profile: "ask", ApprovalTimeout: "1s"})
 	bus := newStubBus()
 	approvalRequests := 0
@@ -3348,18 +3485,38 @@ func TestProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
 	})
 	require.NoError(t, g.Subscribe(bus))
 
-	first, err := g.Decide(context.Background(), sdk.GuardianRequest{
-		ID:      "req-remote-first",
-		Action:  sdk.GuardianActionExec,
-		Command: "git push origin main",
-	})
-	require.NoError(t, err)
-	require.Equal(t, sdk.GuardianDecisionAllow, first.Action)
+	workingDir := t.TempDir()
+	grantReq := sdk.GuardianRequest{
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionFileWrite,
+			profileMetadataKey:    "ask",
+		},
+	}
+	for key, value := range grantConstraintsForRequest(grantReq, sdk.GuardianDecision{
+		Profile: "ask",
+		Metadata: map[string]any{
+			actionTypeMetadataKey: actionFileWrite,
+		},
+	}, true) {
+		grantReq.Metadata[key] = value
+	}
+	g.grants = []sdk.GuardianGrant{
+		{
+			ID:         "legacy-profile-grant",
+			Scope:      sdk.GuardianGrantScopeProfile,
+			Request:    grantReq,
+			Resolution: sdk.GuardianResolution{Action: sdk.GuardianResolutionAllow},
+		},
+	}
 
 	second, err := g.Decide(context.Background(), sdk.GuardianRequest{
-		ID:      "req-remote-second",
-		Action:  sdk.GuardianActionExec,
-		Command: "git push origin main",
+		ID:         "req-profile-grant-second",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, sdk.GuardianDecisionAllow, second.Action)
@@ -3367,14 +3524,15 @@ func TestProfileGrantMatchesOnlyActiveProfile(t *testing.T) {
 
 	g.cfg.Profile = "auto"
 	third, err := g.Decide(context.Background(), sdk.GuardianRequest{
-		ID:      "req-remote-third",
-		Action:  sdk.GuardianActionExec,
-		Command: "git push origin main",
+		ID:         "req-profile-grant-third",
+		Action:     sdk.GuardianActionWrite,
+		Path:       "out.txt",
+		WorkingDir: workingDir,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, sdk.GuardianDecisionAllow, third.Action)
 	assert.Empty(t, third.MatchedGrantID)
-	assert.Equal(t, 2, approvalRequests)
+	assert.Equal(t, 0, approvalRequests)
 }
 
 func TestSessionGrantNetworkReadRequiresSameHost(t *testing.T) {
@@ -3743,6 +3901,28 @@ func assertPublishedDecision(t *testing.T, bus *stubBus, requestID string, actio
 		}
 		return false
 	}, time.Second, time.Millisecond)
+}
+
+func assertPublishedSnapshot(t *testing.T, bus *stubBus) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		for _, ev := range bus.events() {
+			if ev.Topic == sdk.GuardianSnapshotTopic {
+				_, ok := ev.Payload.(sdk.GuardianSnapshot)
+				return ok
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
+}
+
+func assertNotPublishedSnapshot(t *testing.T, bus *stubBus) {
+	t.Helper()
+
+	for _, ev := range bus.events() {
+		assert.NotEqual(t, sdk.GuardianSnapshotTopic, ev.Topic)
+	}
 }
 
 func assertProfileRule(t *testing.T, profile sdk.GuardianProfile, actionType string, decision sdk.GuardianDecisionAction) {

@@ -948,6 +948,10 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	if scope == sdk.GuardianGrantScopeOnce {
 		return
 	}
+	if scope == sdk.GuardianGrantScopeProfile {
+		g.persistProfileRule(approval, decision, resolution)
+		return
+	}
 
 	request := approval.Request
 	if request.Metadata == nil {
@@ -970,6 +974,54 @@ func (g *Guardian) applyGrant(approval sdk.GuardianApproval, decision sdk.Guardi
 	g.mu.Lock()
 	g.grants = append(g.grants, grant)
 	g.mu.Unlock()
+}
+
+func (g *Guardian) persistProfileRule(approval sdk.GuardianApproval, decision sdk.GuardianDecision, resolution sdk.GuardianResolution) {
+	g.mu.Lock()
+	activeProfile := g.cfg.Profile
+	updated := cloneGuardianConfig(g.cfg)
+	g.mu.Unlock()
+
+	rule, ok := buildProfileRuleFromApproval(approval, decision, activeProfile, resolution)
+	if !ok {
+		return
+	}
+	appendProfileRule(&updated, activeProfile, rule)
+
+	if err := g.configWriter.SaveExtensionConfig(extensionName, extensionName, updated); err != nil {
+		return
+	}
+
+	g.mu.Lock()
+	g.cfg = updated
+	g.profiles = resolveProfiles(updated.Profiles)
+	g.mu.Unlock()
+	g.publishSnapshot()
+}
+
+func appendProfileRule(cfg *Config, profileName string, rule sdk.GuardianProfileRule) {
+	if cfg.Profiles == nil {
+		cfg.Profiles = make(map[string]sdk.GuardianProfile)
+	}
+
+	profile := cfg.Profiles[profileName]
+	if profile.Name == "" {
+		profile.Name = profileName
+	}
+	if profile.Metadata == nil {
+		profile.Metadata = make(map[string]any)
+	}
+	if isBuiltInProfileName(profileName) {
+		if metadataString(profile.Metadata, "extends") == "" {
+			profile.Metadata["extends"] = profileName
+		}
+	}
+	profile.Rules = append(profile.Rules, cloneGuardianProfileRule(rule))
+	cfg.Profiles[profileName] = profile
+}
+
+func isBuiltInProfileName(profile string) bool {
+	return profile == defaultProfile || profile == autoProfile || profile == yoloProfile
 }
 
 func buildProfileRuleFromApproval(approval sdk.GuardianApproval, decision sdk.GuardianDecision, activeProfile string, resolution sdk.GuardianResolution) (sdk.GuardianProfileRule, bool) {
@@ -1447,8 +1499,7 @@ func cloneGuardianRequest(req sdk.GuardianRequest) sdk.GuardianRequest {
 func cloneGuardianPolicyOverlay(overlay sdk.GuardianPolicyOverlay) sdk.GuardianPolicyOverlay {
 	overlay.Rules = append([]sdk.GuardianProfileRule(nil), overlay.Rules...)
 	for i := range overlay.Rules {
-		overlay.Rules[i].Actions = append([]sdk.GuardianAction(nil), overlay.Rules[i].Actions...)
-		overlay.Rules[i].Metadata = maps.Clone(overlay.Rules[i].Metadata)
+		overlay.Rules[i] = cloneGuardianProfileRule(overlay.Rules[i])
 	}
 	return overlay
 }
@@ -1464,15 +1515,29 @@ func cloneGuardianPolicyOverlays(overlays []policyOverlay) []sdk.GuardianPolicyO
 func cloneSDKProfiles(profiles map[string]sdk.GuardianProfile) map[string]sdk.GuardianProfile {
 	out := make(map[string]sdk.GuardianProfile, len(profiles))
 	for name, profile := range profiles {
-		profile.Metadata = maps.Clone(profile.Metadata)
-		profile.Rules = append([]sdk.GuardianProfileRule(nil), profile.Rules...)
-		for i := range profile.Rules {
-			profile.Rules[i].Actions = append([]sdk.GuardianAction(nil), profile.Rules[i].Actions...)
-			profile.Rules[i].Metadata = maps.Clone(profile.Rules[i].Metadata)
-		}
-		out[name] = profile
+		out[name] = cloneGuardianProfile(profile)
 	}
 	return out
+}
+
+func cloneGuardianConfig(cfg Config) Config {
+	cfg.Profiles = cloneSDKProfiles(cfg.Profiles)
+	return cfg
+}
+
+func cloneGuardianProfile(profile sdk.GuardianProfile) sdk.GuardianProfile {
+	profile.Metadata = maps.Clone(profile.Metadata)
+	profile.Rules = append([]sdk.GuardianProfileRule(nil), profile.Rules...)
+	for i := range profile.Rules {
+		profile.Rules[i] = cloneGuardianProfileRule(profile.Rules[i])
+	}
+	return profile
+}
+
+func cloneGuardianProfileRule(rule sdk.GuardianProfileRule) sdk.GuardianProfileRule {
+	rule.Actions = append([]sdk.GuardianAction(nil), rule.Actions...)
+	rule.Metadata = maps.Clone(rule.Metadata)
+	return rule
 }
 
 func grantActionType(req sdk.GuardianRequest) string {
