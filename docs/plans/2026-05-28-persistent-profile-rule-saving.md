@@ -110,8 +110,8 @@
 - [x] run linter with `golangci-lint run` or the repo Makefile if present
 
 ### Task 7: Update documentation
-- [ ] update `README.md` Guardian profile examples if they document profile rules
-- [ ] update `CLAUDE.md` if new Guardian persistence behavior should be known by agents
+- [x] update `README.md` Guardian profile examples if they document profile rules
+- [x] update `CLAUDE.md` if new Guardian persistence behavior should be known by agents
 
 ## Technical Details
 - Saved rule metadata should reuse existing grant constraint keys where possible:

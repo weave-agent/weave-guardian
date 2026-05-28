@@ -1,8 +1,8 @@
 # Guardian Extension
 
-Guardian is the core Weave policy extension for normalizing actions, classifying risk, resolving policy profiles, managing approvals, storing session grants, and publishing decision snapshots.
+Guardian is the core Weave policy extension for normalizing actions, classifying risk, resolving policy profiles, managing approvals, storing session grants, saving profile rules, and publishing decision snapshots.
 
-The extension registers under the `guardian` config scope and publishes `guardian.registered` when subscribed to the SDK bus. Other extensions should communicate with Guardian through the typed SDK Guardian interface and SDK bus events.
+The extension registers under the `guardian` config scope with scoped config writer access and publishes `guardian.registered` when subscribed to the SDK bus. Other extensions should communicate with Guardian through the typed SDK Guardian interface and SDK bus events.
 
 ## Profiles
 
@@ -29,10 +29,13 @@ Example configuration:
       },
       "rules": [
         {
-          "decision": "ask",
-          "reason": "network reads require team approval",
+          "decision": "allow",
+          "reason": "approved host for this profile",
           "metadata": {
-            "action_type": "network.read"
+            "grant_action_type": "network.read",
+            "grant_constraints_version": "1",
+            "grant_network_host": "registry.npmjs.org",
+            "grant_profile": "team"
           }
         },
         {
@@ -52,7 +55,9 @@ Fields:
 
 - `profile`: active profile name. Defaults to `ask`; unknown profile names fall back to `ask`.
 - `approval_timeout`: duration to wait for an approval resolution before denying an ask decision. Defaults to `2m`.
-- `profiles`: custom profiles keyed by profile name using the shared SDK profile shape. Each custom profile extends `ask` by default, or the profile named by `metadata.extends`, and can override detailed action types through rules whose metadata includes `action_type`.
+- `profiles`: profile additions keyed by profile name using the shared SDK profile shape. Each profile extends `ask` by default, or the profile named by `metadata.extends`. Entries named `ask`, `auto`, or `yolo` extend the matching built-in profile unless a different base is explicitly configured.
+
+Profile rules can target detailed action types through `metadata.action_type`, which is treated as a broad rule for that action type. Rules saved from profile approvals are narrower by default and use `metadata.grant_action_type` plus constraint metadata such as `grant_path_exact`, `grant_path_prefix`, `grant_command_exact`, `grant_command_prefix`, `grant_command_family`, `grant_working_dir`, or `grant_network_host`.
 
 ## Policy Overlays
 
@@ -94,8 +99,10 @@ Exec decisions include `metadata.action_type` for the selected policy action. Th
 
 ## Approvals and Grants
 
-Ask decisions publish ID-based approval requests. Resolutions can allow or deny once, for the current session, or for the active profile. Session and profile grants match future requests by normalized action type.
+Ask decisions publish ID-based approval requests. Resolutions can allow or deny once, for the current session, or for the active profile. Session grants stay in memory and match future requests by normalized action type plus reusable constraints derived from the original request.
+
+Profile approvals are saved as profile rules in Guardian config instead of as runtime grants. Guardian builds a constrained rule for the selected rule scope, saves it to the active profile, reloads profile policy, and publishes an updated snapshot. Missing or unsupported rule scopes fall back to conservative defaults: exact file for file requests, exact command for exec requests, host for network requests, and action type for other requests. Guardian refuses persisted allow rules for hard-blocked action types.
 
 In headless mode, ask decisions are blocked immediately without publishing an approval request. Outside headless mode, ask decisions wait up to `approval_timeout`; timeout or context cancellation blocks the action.
 
-Guardian records recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp. `RecentDecisions()` returns the last 100 records; this audit history is separate from SDK snapshots. Snapshots include the active profile, resolved profiles, active runtime overlays, pending approvals, and current grants. Clear-grants events can remove all grants or selected grant scopes and IDs.
+Guardian records recent decisions with action type, verdict, reason, evidence, rule ID, and timestamp. `RecentDecisions()` returns the last 100 records; this audit history is separate from SDK snapshots. Snapshots include the active profile, resolved profiles, active runtime overlays, pending approvals, current session grants, and saved profile rules. Clear-grants events can remove all grants or selected grant scopes and IDs.
